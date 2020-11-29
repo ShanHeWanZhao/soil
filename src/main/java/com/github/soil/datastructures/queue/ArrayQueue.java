@@ -1,15 +1,13 @@
 package com.github.soil.datastructures.queue;
 /**
- * @author Trd
- * @date 2020-02-29 13:52
- */
-/**
  * 非环形数组队列
  * 该实现的方法：
  *		（1）添加
  *		（2）删除
  *	缺陷：
  *		（1）数组不能循坏使用
+ * @author Trd
+ * @date 2020-02-29 13:52
  */
 public class ArrayQueue{
 	

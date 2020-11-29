@@ -1,0 +1,3 @@
+查看端口占用：（1）查看所有：netstat -ano
+    (2)查看被占用端口对应的PID，输入命令：netstat -aon | findstr 端口号。（最后一位数字，即PID）
+    (3)查看本机ip: ipconfig     或者ipconfig/all
