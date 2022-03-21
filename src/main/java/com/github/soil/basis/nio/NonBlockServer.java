@@ -17,6 +17,9 @@ import java.util.Properties;
  * @date 2020/06/21 17:53
  */
 public class NonBlockServer {
+    /**
+     * @throws IOException
+     */
     @Test
     public void server() throws IOException {
         // 创建服务端通道
@@ -37,6 +40,7 @@ public class NonBlockServer {
                 SelectionKey next = it.next();
                 // 判断是是什么事件
                 if (next.isAcceptable()) {
+                    System.out.println(next.toString() +"("+ next.channel() +") -> Accept事件");
                     // Accept就绪,获取客户端的Channel
                     SocketChannel sChannel = ssChannel.accept();
                     // 不阻塞
@@ -44,6 +48,7 @@ public class NonBlockServer {
                     // 将客户端的Channel注册到Selector上，监听Read事件
                     sChannel.register(selector, SelectionKey.OP_READ);
                 } else if (next.isReadable()) {
+                    System.out.println(next.toString() + "("+next.channel() +") -> read事件");
                     // 获取当前Selector上就绪状态的Read事件的客户端Channel
                     SocketChannel sChannel = (SocketChannel) next.channel();
                     ByteBuffer buffer = ByteBuffer.allocate(1024);

@@ -5,7 +5,7 @@ package com.github.soil.basis.vm;
  * @date 2020/08/18 16:06
  */
 public class Constructor {
-    Constructor c = new Constructor();
+    static Constructor c = new Constructor();
 
     public static void main(String[] args) {
         Constructor constructor = new Constructor();
