@@ -149,14 +149,59 @@ ConcurrentHashMap的数据结构和HashMap差不多，也是数组+链表实现�
 - 有线程正在进行扩容操作，则先帮助扩容
 - bucket被暂用，锁住根节点，开始构造到链表的为尾节点。添加到尾节点后，在判断当前链表长度是否超过8，否则就转换为红黑树
 
-# 4.AbstractQueuedSynchronizer
+# 4. LockSupport
+
+​	java中实现**当前线程的阻塞和定时阻塞**，并提供**唤醒指定线程**的工具，在内部使用sun.misc.Unsafe来实现这一系列的操作。在AQS中普遍被使用
+
+部分核心方法：
+
+```java
+/**
+ * 唤醒指定的线程（如果该线程被park了）
+ * 如果线程先被unpark（解除等待）了，那么该线程下一次调用park(进入等待)则不起作用
+ */
+public static void unpark(Thread thread) {
+    if (thread != null)
+        UNSAFE.unpark(thread);
+}
+
+/**
+ * 阻塞当前线程，并设置一个阻塞器（这个只是用来jstack查看，并不能通过notifyAll来唤醒阻塞的线程）
+ */
+public static void park(Object blocker) {
+    Thread t = Thread.currentThread();
+    setBlocker(t, blocker);
+    UNSAFE.park(false, 0L);
+    setBlocker(t, null);
+}
+
+/**
+ * 定时等待，阻塞当前线程指定的纳秒数，当时间到达时就自动唤醒
+ */
+public static void parkNanos(long nanos) {
+    if (nanos > 0)
+        UNSAFE.park(false, nanos);
+}
+
+/**
+ * 定时等待，阻塞当前线程直到指定的时间戳（deadline）到来就自动唤醒
+ */
+public static void parkUntil(long deadline) {
+    UNSAFE.park(true, deadline);
+}
+```
+
+# 5.AbstractQueuedSynchronizer
 
 重要的内部数据结构Node:
 
 ​	Node是一个通用的数据结构，既充当同步队列节点，也充当等待队列的节点
 
-- **同步队列**：当线程获取锁时，未获取到锁的线程会构造成一个Node，并放入同步队列，等待被唤醒。
-- **等待队列**：当已经获取到锁的线程触发**java.util.concurrent.locks.Condition#await()**方法阻塞自己，让出锁时。会将当前线程构造成一个Node，并放入等待队列。而当其他线程调用**java.util.concurrent.locks.Condition#signal**等方法时，便会将等待队列的Node转入到同步队列
+- **同步队列**：**当线程尝试获取锁时，未获取到锁的线程会被构造成一个Node，利用CAS放入同步尾部作为尾节点，等待被唤醒。同步队列关联的是整个锁，一对一的关系。而同步队列中的Node又根据nextWaiter字段判断当前Node是共享节点还是独占节点**
+  - **共享节点：共享锁的实现（Semaphore、CountDownLatch等）。nextWaiter字段为固定的Node#SHARED。释放当前节点的线程后，还具有向后传播的能力（根据state的值判断是否需要释放后继共享节点里的线程）**
+  - **互斥节点：互斥锁的实现（ReentrantLock等），nextWaiter字段为Node#EXCLUSIVE（即null），只会释放当前节点里的线程**
+- **等待队列**：当已经获取到锁的线程触发**java.util.concurrent.locks.Condition#await()**方法阻塞自己，让出锁时。**会将当前线程构造成一个Node（等待节点，状态为CONDITION），利用CAS放入等待队列尾部。等待队列关联的是Condition。所以，当ReentrantLock构造多个Condition时，就有多个等待队列，ReentrantLock和等待队列可以为一对多，而Condition和等待队列时一对一**。而**当其他线程获取当前锁（ReentrantLock）的线程调用java.util.concurrent.locks.Condition#signal等方法时，便会将等待队列的首节点转入到同步队列的尾节点，并重新设置Node的状态**
+  - **等待节点：nextWaiter字段为等待队列中下一个等待节点的指针**
 
 ```java
 static final class Node {
@@ -179,13 +224,15 @@ static final class Node {
     volatile Node next;
     // 等待线程
     volatile Thread thread;
-    // 等待队列专用（配合Condition）
+    // 1. 当前Node为同步队列中的共享节点时：SHARED
+    // 2. 当前Node为同步队列中的独占节点时：null
+    // 3. 当前Node为等待队列中的节点时：下一个等待节点的指针
     Node nextWaiter;
 	// 判断当前节点是互斥锁，还是共享锁
     final boolean isShared() {
         return nextWaiter == SHARED;
     }
-
+	// 当前节点的前驱结点
     final Node predecessor() throws NullPointerException {
         Node p = prev;
         if (p == null)
@@ -209,7 +256,7 @@ static final class Node {
 }
 ```
 
-关键字段：
+关键字段和方法：
 
 ```java
 // 同步队列专属的头尾节点。
@@ -222,11 +269,17 @@ private volatile int state;
 static final long spinForTimeoutThreshold = 1000L;
 // 获取到独占锁的线程
 private transient Thread exclusiveOwnerThread;
-```
 
-关键方法：
+/**
+	留给子类实现的尝试获取共享锁的方法，共享锁获取，返回AQS里state的剩余值 
+    1：返回值 > 0，代表当前线程获取成功，且state还有剩余值，表示可以继续传播给下一个共享节点线程，让其尝试获取锁 
+    2：返回值 = 0，代表当前线程获取成功，但state值刚好被用完，那么下一个共享节点线程就不应该被唤醒了（因为这时已经获取不到state的剩余值了）
+    3：返回值 < 0，代表当前线程都没获取成功，直接获取失败，阻塞等待被其他线程唤醒后在尝试获取
+*/
+protected int tryAcquireShared(int arg) {
+    throw new UnsupportedOperationException();
+}
 
-```java
 // 获取共享锁
 private void doAcquireSharedInterruptibly(int arg)
     throws InterruptedException {
@@ -235,7 +288,7 @@ private void doAcquireSharedInterruptibly(int arg)
     try {
         for (;;) {
             final Node p = node.predecessor();
-            if (p == head) {
+            if (p == head) { // 首节点的下个节点才有资格获取锁（首节点就是获取到锁的节点）
                 int r = tryAcquireShared(arg);
                 if (r >= 0) { // 至少当前线程获取成功了，但可能state值已经被用完了
                     // 获取成功，传播给下一个共享Node，根据state的剩余值来判断是否需要唤醒下一个共享Node里的线程
@@ -254,34 +307,73 @@ private void doAcquireSharedInterruptibly(int arg)
             cancelAcquire(node);
     }
 }
-// 释放共享锁
+// 释放共享锁（Semaphore会使用）
 private void doReleaseShared() {
-        for (;;) {
-            Node h = head;
-            if (h != null && h != tail) {
-                int ws = h.waitStatus;
-                if (ws == Node.SIGNAL) {
-                    if (!compareAndSetWaitStatus(h, Node.SIGNAL, 0))
-                        continue;            // loop to recheck cases
-                    unparkSuccessor(h);
-                }
-                else if (ws == 0 &&
-                         !compareAndSetWaitStatus(h, 0, Node.PROPAGATE))
-                    continue;                // loop on failed CAS
+    for (;;) {
+        Node h = head;
+        if (h != null && h != tail) {
+            int ws = h.waitStatus;
+            if (ws == Node.SIGNAL) {
+                if (!compareAndSetWaitStatus(h, Node.SIGNAL, 0))
+                    continue;            // loop to recheck cases
+                unparkSuccessor(h);
             }
-            if (h == head)                   // loop if head changed
-                break;
+            else if (ws == 0 &&
+                     !compareAndSetWaitStatus(h, 0, Node.PROPAGATE))
+                continue;                // loop on failed CAS
+        }
+        if (h == head)                   // loop if head changed
+            break;
+    }
+}
+
+/*
+    将目标节点（参数node）设为同步队列的尾部（使用CAS来解决并发问题）。
+    所以，在这整个过程中，链表中除首节点外其余节点的prev在任何时刻都不会为空；
+    	但除尾节点外其余节点的next字段有可能为空 （刚好走完第②步，还没走到第③步）
+*/
+private Node enq(final Node node) {
+    for (;;) {
+        Node t = tail;
+        if (t == null) { // 初始化同步队列，设置一个空Node为首尾节点
+            if (compareAndSetHead(new Node()))
+                tail = head;
+        } else {
+            node.prev = t; // 先将目标节点的prev设置程原尾节点 ①
+            if (compareAndSetTail(t, node)) { // CAS设置尾节点 ②
+                t.next = node; // 设置成功了，才把原尾节点的next设为目标节点（现尾节点）③
+                return t;
+            }
         }
     }
+}
+
+// 唤醒目标节点（参数node）的最近下一个可唤醒节点中的线程
+private void unparkSuccessor(Node node) {
+    int ws = node.waitStatus;
+    if (ws < 0)
+        compareAndSetWaitStatus(node, ws, 0);
+    // 首节点的下个节点唤醒失败时，就从尾节点向前遍历，直到找到距首节点最近的可唤醒的节点
+    // 目的是避免并发时（节点入队列和唤醒），倒数第二个节点（甚至不止）的next字段为空，导致拿不到其实已经入队列里的后续节点
+    Node s = node.next;
+    if (s == null || s.waitStatus > 0) {
+        s = null;
+        for (Node t = tail; t != null && t != node; t = t.prev)
+            if (t.waitStatus <= 0)
+                s = t;
+    }
+    if (s != null)
+        LockSupport.unpark(s.thread);
+}
 ```
 
-# 5.ReentrantLock
+# 6.ReentrantLock
 
 以ReentrantLock为例，分析公平锁和非公平锁的实现。
 
-因为ReentrantLock是互斥锁，所以只允许一个线程获取到锁，所以AQS的state最大只能为1
+因为ReentrantLock是互斥锁，所以只允许一个线程获取到锁，所以AQS的state初始值为1，当获取到锁的线程尝试重入时，便会增加state。
 
-## 5.1 非公平锁（NonfairSync）：
+## 6.1 非公平锁（NonfairSync）：
 
 lock（加锁过程）：
 
@@ -295,7 +387,7 @@ unlock（释放锁）：
 - java.util.concurrent.locks.ReentrantLock.Sync#tryRelease：复原state（将其归0），exclusiveOwnerThread设为null
 - java.util.concurrent.locks.AbstractQueuedSynchronizer#release：在tryRelease成功后，使用**java.util.concurrent.locks.LockSupport#unpark**方法唤醒同步队列首节点的下一个节点里的线程，让他再去尝试获取锁
 
-## 5.2 公平锁（FairSync）：
+## 6.2 公平锁（FairSync）：
 
 lock（加锁过程）：
 
@@ -348,20 +440,20 @@ protected final boolean tryAcquire(int acquires) {
 
 unlock（释放锁）：和非公平锁一样
 
-## 5.3 总结
+## 6.3 总结
 
-### 5.3.1 为什么叫公平锁和非公平锁
+### 6.3.1 为什么叫公平锁和非公平锁
 
 ​	根据上面的分析，**公平锁在获取锁是总是会先判断当前线程是否是等待最久的线程**。**所以，就算是同步队列存在大量Node，且有线程第一次在获取锁，那么，下一次获取到锁的线程也一定是同步队列的首节点的下一个节点（首节点就是当前获取到锁的节点，只有获取成功了，同步才会更新首节点）**
 
 ​	而**非公平锁对于已经进入同步队列的线程来说，肯定也只会首节点的下一个线程能获取锁，但对于还未构造成Node加入到同步队列的线程来说，这个线程和首节点的下一个节点里的线程能竞争获取锁**，所以非公平。**但对于已经进入同步队列的线程来说，前驱结点是一定比后面的节点先获取到锁的**
 
-### 5.3.2 **各自优势**
+### 6.3.2 **各自优势**
 
 - 公平锁：防止线程饥饿，分散性很好
-- 非公平锁：更快。一是获取锁是不用判断当前线程是否是等待最就的线程。二是**上下文交换没有公平锁频繁**。在存在大量锁竞争的前提下，可以肯定，公平锁上下文切换很频繁，获取锁后的线程再次获取锁时是一定会阻塞的。而非公平锁则不一样，下一次获取到锁的线程仍可能是上一次获取到锁的线程，没有上下文切换
+- 非公平锁：更快。一是**获取锁是不用判断当前线程是否是等待最久的线程**。二是**上下文交换没有公平锁频繁**。在存在大量锁竞争的前提下，可以肯定，公平锁上下文切换很频繁，获取锁后的线程再次获取锁时是一定会阻塞的。而非公平锁则不一样，下一次获取到锁的线程仍可能是上一次获取到锁的线程，没有上下文切换
 
-# 6.CountDownLatch
+# 7.CountDownLatch
 
 CountDownLatch为共享锁实现，只能使用一次。用来“卡点”，阻塞的线程需要等待其他线程准备好了后（countDown直到AQS里的state为0），才继续被唤醒执行后面的代码。
 
@@ -370,7 +462,11 @@ CountDownLatch为共享锁实现，只能使用一次。用来“卡点”，阻
 内部的同步器Sync主要方法
 
 ```java
-// 获取共享锁，只有AQS的state为0才能获取到
+/**
+	获取共享锁，只有AQS的state为0才能获取到
+	通过这个接口就可以猜到，当state为0时（拉下了所有门闩），总会返回1，代表获取锁成功。
+	并依次传播下去递归调用这个方法，直到同步队列的所有Node里的线程全部唤醒，这就是CountDownLatch的原理
+*/
 protected int tryAcquireShared(int acquires) {
     return (getState() == 0) ? 1 : -1;
 }
@@ -391,11 +487,11 @@ protected boolean tryReleaseShared(int releases) {
 
 await方法会阻塞当前线程，直到其他线程“拉下所有门闩”。阻塞的线程会构造为共享节点加入同步队列，只有队首节点的下一个节点才有资格尝试获取锁，获取不到就LockSupport#park
 
-countDown会将state值减小1，当state将为0时，释放同步队列里的第二个共享节点里的线程。当这个线程释放后，就能成功获取到锁了，将这个时间传播下去，一次唤醒同步队列里的所有共享节点。至此，所有被阻塞的线程都被唤醒且会成功获取到锁，最终从await方法里返回
+countDown会将state值减小1，当state将为0时，释放同步队列里的第二个共享节点里的线程。当这个线程释放后，就能成功获取到锁了，将这个事件传播下去，一次唤醒同步队列里的所有共享节点。至此，所有被阻塞的线程都被唤醒且会成功获取到锁，最终从await方法里返回
 
-# 7.Semaphore
+# 8.Semaphore
 
-**信号量，共享锁实现。可以指y段使用Semaphore锁住的代码最多能有state个线程同时运行。**
+​		**信号量，共享锁实现。可以利用构造器指定令牌（permits）的数量。当线程到达时，获取（acquire）指定数量的令牌，当没有可用令牌（premits为0）时，阻塞线程，等待令牌的释放（release）再被唤醒后继续执行。基于此，即可实现共享锁（permits大于1），也可实现不可重入的互斥锁（permits为1）**
 
 也分为公平锁和分公平锁，其判断方式完全和ReentrantLock一致。
 
@@ -403,7 +499,7 @@ countDown会将state值减小1，当state将为0时，释放同步队列里的�
 
 ​		**其实现方式就是将state设为我们允许并发运行的线程数量，每当一个线程获取到锁后，将state - 1，如果state为0则阻塞所有准备进入同步块的线程，并将其构造为共享节点加入同步队列。每当有线程从同步块退出时，将state + 1，并根据是否非公平来唤醒同步队列的第二个节点来尝试获取锁**
 
-# 8.Condition接口
+# 9.Condition接口
 
 **等待通知接口，代替Object原生的wait和notify，其具体实现为AQS里的ConditionObject**
 
@@ -420,7 +516,7 @@ Condition的实现是用了**等待队列（但数据结构还是AQS里的Node�
 
 只有获取到锁的线程才能调用Condition的阻塞和唤醒方法
 
-## 8.1 Condition#await
+## 9.1 Condition#await
 
 ```java
 public final void await() throws InterruptedException {
@@ -453,7 +549,7 @@ public final void await() throws InterruptedException {
 - 死循环判断当前节点是否为同步节点（等待节点在等待队列里，是一定要阻塞的。同步节点在同步队列里，是可以并被唤醒并尝试获取锁的），await到这里线程就阻塞了
 - 当被唤醒后，当前节点一定被加入了同步队列，再尝试获取锁，如果能获取到，代表就可以返回了。如果获取不到，就表示当前同步块被其他线程暂用了，也还是阻塞。不过下一次被唤醒后就会通过同步队列的唤醒方式来尝试获取锁
 
-## 8.2 Condition#signal和signalAll
+## 9.2 Condition#signal和signalAll
 
 ```java
 private void doSignal(Node first) {
@@ -479,13 +575,13 @@ final boolean transferForSignal(Node node) {
 
 signal主要就是将等待队列的首节点转移到同步队列的为节点，signalAll则是将等待队列中的所有节点都转移到同步节点。所以signal并不能唤醒await的线程
 
-## 8.3 总结
+## 9.3 总结
 
 Condition实现了等待通知，当一个线程进入同步块后，就可以调用await，释放自己获取的锁资源，将自己阻塞。内部实现是首先释放锁资源，再将当前线程构造成一个等待节点，加入ConditionObject的等待队列的末尾。而当其他进入同步块的线程调用signal后，会将等待队列的首节点转移到同步队列，并将其变成同步节点，最后再使用同步队列的唤醒机制等待被唤醒。
 
 ​	所以signal并不能直接唤醒一个await的线程，最佳使用案例就是消费者发送者机制，比如阻塞队列。
 
-# 9. ReentrantReadWriteLock
+# 10. ReentrantReadWriteLock
 
 ​		读写锁，支持并发的读或互斥的写。读写锁分别各自实现，读锁使用共享锁，写锁使用互斥锁。ReentrantReadWriteLock内部的ReadLock和WriteLock都使用了内部同一个Sync对象来实现读写加锁的功能，在Sync内，他将AQS的state转换为二进制，高十六位表示读状态位，低十六位表示写状态位。由于读是共享的，所以state的高十六位表示了当前有多少个线程在读，在此期间写锁是禁用的。而低十六位是写锁，所以只可能有一个线程，但可能数字大于1（这是就表示写锁重入了）。当写锁被占用是，读是不允许的
 
@@ -502,9 +598,9 @@ static int exclusiveCount(int c) { return c & EXCLUSIVE_MASK; }
 
 读写锁都支持重入，但写锁只能让当前线程重入，并且要解锁时需要unlock重入的次数。
 
-# 10. ThreadPoolExecutor
+# 11. ThreadPoolExecutor
 
-## 10.1 重要字段：
+## 11.1 重要字段
 
 ```java
 //状态控制器，初始值： 1110 0000 0000 0000 0000 0000 0000 0000
@@ -531,7 +627,7 @@ private static final int TERMINATED =  3 << COUNT_BITS;
 
 // 计算线程池的状态
 private static int runStateOf(int c)     { return c & ~CAPACITY; } // 后29位为0，前3为跟随c
-// 计算线程池有多少线程
+// 计算线程池有多少工作线程
 private static int workerCountOf(int c) { return c & CAPACITY; } // 前3位为0，后面29为跟随 c
 private static int ctlOf(int rs, int wc) { return rs | wc; }
 
@@ -561,14 +657,17 @@ private volatile int corePoolSize;
 private volatile int maximumPoolSize;
 ```
 
-> ​		ThreadPoolExecutor利用一个int类型的数来同时保存当前线程池状态和工作线程的数量，高3为用来表示当前线程的数量，低29为用来保存工作线程的数量。
+> ​		ThreadPoolExecutor利用一个int类型的数来同时保存当前线程池状态和工作线程的数量，高3为用来表示当前线程的状态，低29为用来保存工作线程的数量。
 >
-> ​		ThreadPoolExecutor内部的Worker就是工作线程的抽象，每一个Worker都是一个工作现场，同时，Worker有继承了AQS可以充当锁的角色，目的是更好的让外部知道当前worker是否正在运行，worker运行时（获取到任务后开始运行）会加锁，通过测试当前worker是否加上锁或者是否可以获得当前worker的锁，便可知道worker是否繁忙，有助于worker的清理
+> ​		ThreadPoolExecutor内部的Worker就是工作线程的抽象，每一个Worker都是一个工作线程。同时，Worker又继承了AQS可以充当锁的角色，目的是更好的让外部知道当前worker是否正在运行，worker运行时（获取到任务后开始运行）会加锁，通过测试当前worker是否加上锁或者是否可以获得当前worker的锁，便可知道worker是否繁忙，有助于worker的清理
 
-## 10.2 核心方法
+## 11.2 核心方法
 
 - shutdown：将当前线程池状态设为SHUTDOWN状态，在中断空闲的Worker（判断Worker是否空闲就通过它的锁方法）。**所以，执行了这个方法后，正在执行的任务不会被中断，且已经存在workQueue中的Runnable也可以被执行，但是不能放入新的Runnable**
+
 - shutdownNow：将当前线程池状态设为STOP状态，将所有Worker设置为中断位，且倒出workQueue中的所有Runnable。**所以，执行了这个方法后，正在允许的任务如果检测了中断位就会立即退出，如果没检测就还是会执行完，而已经存在workQueue中的Runnable将不会被执行，会将这些Runnable返回给调用者，让调用者处理**
+
+​		ThredPoolExecutor除了核心方法外，还提供了很多辅助方法。比如setCorePoolSize方法之类的set方法，是支持动态修改参数的。而prestart相关方法都支持预启动核心线程等
 
 ```java
 // 执行Runnable的方法
@@ -607,88 +706,90 @@ public void run() {
 }
 
 final void runWorker(Worker w) {
-        Thread wt = Thread.currentThread();
-        Runnable task = w.firstTask;
-        w.firstTask = null;
-        w.unlock(); // allow interrupts
-        boolean completedAbruptly = true;
-        try {
-            // 利用阻塞队列，一直循环取任务执行（阻塞队列为空时会阻塞当前想取出元素的线程）
-            while (task != null || (task = getTask()) != null) {
-                w.lock();
-                if ((runStateAtLeast(ctl.get(), STOP) ||
-                     (Thread.interrupted() &&
-                      runStateAtLeast(ctl.get(), STOP))) &&
-                    !wt.isInterrupted())
-                    wt.interrupt();
+    Thread wt = Thread.currentThread();
+    Runnable task = w.firstTask;
+    w.firstTask = null;
+    w.unlock(); // allow interrupts
+    boolean completedAbruptly = true;
+    try {
+        // 利用阻塞队列，一直循环取任务执行（阻塞队列为空时会阻塞当前想取出元素的线程）
+        // 如果getTask为null，就代表会终结当前工作线程
+        while (task != null || (task = getTask()) != null) {
+            w.lock();
+            if ((runStateAtLeast(ctl.get(), STOP) ||
+                 (Thread.interrupted() &&
+                  runStateAtLeast(ctl.get(), STOP))) &&
+                !wt.isInterrupted())
+                wt.interrupt();
+            try {
+                beforeExecute(wt, task); // 钩子函数before
+                Throwable thrown = null;
                 try {
-                    beforeExecute(wt, task);
-                    Throwable thrown = null;
-                    try {
-                        task.run();
-                    } catch (RuntimeException x) {
-                        thrown = x; throw x;
-                    } catch (Error x) {
-                        thrown = x; throw x;
-                    } catch (Throwable x) {
-                        thrown = x; throw new Error(x);
-                    } finally {
-                        afterExecute(task, thrown);
-                    }
+                    task.run(); // 真正的运行Runnable
+                } catch (RuntimeException x) {
+                    thrown = x; throw x;
+                } catch (Error x) {
+                    thrown = x; throw x;
+                } catch (Throwable x) {
+                    thrown = x; throw new Error(x);
                 } finally {
-                    task = null;
-                    w.completedTasks++;
-                    w.unlock();
+                    afterExecute(task, thrown); // 钩子函数after
                 }
+            } finally {
+                task = null;
+                w.completedTasks++;
+                w.unlock();
             }
-            completedAbruptly = false;
-        } finally {
-            processWorkerExit(w, completedAbruptly);
         }
+        completedAbruptly = false;
+    } finally {
+        processWorkerExit(w, completedAbruptly);
     }
+}
 // 核心方法之一，从阻塞队列中取任务
 private Runnable getTask() {
-        boolean timedOut = false; // Did the last poll() time out?
-// 死循环取任务
-        for (;;) {
-            int c = ctl.get();
-            int rs = runStateOf(c);
+    boolean timedOut = false; // Did the last poll() time out?
+    // 死循环取任务
+    for (;;) {
+        int c = ctl.get();
+        int rs = runStateOf(c);
 
-            // Check if queue empty only if necessary.
-            if (rs >= SHUTDOWN && (rs >= STOP || workQueue.isEmpty())) {
-                decrementWorkerCount();
+        // Check if queue empty only if necessary.
+        if (rs >= SHUTDOWN && (rs >= STOP || workQueue.isEmpty())) {
+            decrementWorkerCount();
+            return null;
+        }
+
+        int wc = workerCountOf(c);
+
+        // 允许核心线程过期和非核心线程都可以超时取任务
+        boolean timed = allowCoreThreadTimeOut || wc > corePoolSize;
+
+        if ((wc > maximumPoolSize || (timed && timedOut))
+            && (wc > 1 || workQueue.isEmpty())) {
+            // 原子性的尝试减少一个工作线程，减少成功才返回结束线程
+            if (compareAndDecrementWorkerCount(c)) 
                 return null;
-            }
+            continue;
+        }
 
-            int wc = workerCountOf(c);
-
-            // 允许核心线程过期和非核心线程都可以超时取任务
-            boolean timed = allowCoreThreadTimeOut || wc > corePoolSize;
-
-            if ((wc > maximumPoolSize || (timed && timedOut))
-                && (wc > 1 || workQueue.isEmpty())) {
-                if (compareAndDecrementWorkerCount(c))
-                    return null;
-                continue;
-            }
-
-            try {
-                // 如果是超时取任务，时间结束后还是取不到，则设置timedOut为true，下次循环就可以直接返回null退出了，这样，这个Worker也就终结了
-                Runnable r = timed ?
-                    workQueue.poll(keepAliveTime, TimeUnit.NANOSECONDS) :
-                    workQueue.take();
-                // 不为null才返回，就不用担心返回null而终结了当前线程
-                if (r != null)
-                    return r;
-                timedOut = true;
-            } catch (InterruptedException retry) {
-                timedOut = false;
-            }
+        try {
+            // 如果是超时取任务，时间结束后还是取不到，则设置timedOut为true，下次循环就可以直接返回null退出了，这样，这个Worker也就终结了
+            Runnable r = timed ?
+                workQueue.poll(keepAliveTime, TimeUnit.NANOSECONDS) :
+            workQueue.take();
+            // 不为null才返回，就不用担心返回null而终结了当前线程
+            if (r != null)
+                return r;
+            timedOut = true;
+        } catch (InterruptedException retry) {
+            timedOut = false;
         }
     }
+}
 ```
 
-## 10.3 总结
+## 11.3 总结
 
 **execute Runnable的流程**
 
@@ -699,20 +800,22 @@ private Runnable getTask() {
 
 **Worker的工作流程**
 
-​		调用getTask取任务来执行，如果取出的任务为空，则这个Worker也就结束了。getTask不为空的话，还是先进性一系列的线程池状态校验，在执行钩子函数（beforeExecute），在真正的执行这个Runnable，再执行钩子函数（afterExecute），最后再将completedTasks加1，表示当前Worker完成的任务总数
+​		调用getTask取任务来执行，如果取出的任务为空，则这个Worker也就结束了（终结了）。getTask不为空的话，还是先进性一系列的线程池状态校验，在执行钩子函数（beforeExecute），在真正的执行这个Runnable，再执行钩子函数（afterExecute），最后再将completedTasks加1，表示当前Worker完成的任务总数
 
-**getTask流程**（实现线程过期回收的关键）
+**getTask流程**（实现线程超时回收的关键）
 
 - 先进行一系列的状态校验
-- **判断是否允许超时：设置了allowCoreThreadTimeOut为true或当前线程池的工作线程数量大于核心线程数量就允许超时**
-- 判断是否触发了该减少工作数量数量机制，然后返回null
-- 通过阻塞队列取Runnable，如果不允许超时，则会一直阻塞到这。而允许超时，则会超时等待keepAliveTime纳秒取Runnable，没有就返回null，触发工作现场的减少
+- **判断是否允许超时（满足任意一个就行）**
+  - **allowCoreThreadTimeOut为true（都允许核心线程超时了，那没任务的情况下线程池就不该有线程）**
+  - **当前线程池的工作线程数量大于核心线程数量就允许超时**
+- 判断是否触发减少工作线程数量的机制，然后使用CAS减少工作线程数量，减少成功才返回null，结束当前工作线程
+- 通过阻塞队列取Runnable，如果不允许超时，则会一直阻塞到这。如果允许超时，则会超时等待keepAliveTime纳秒取Runnable，如果取不出来，则设置一次已经超时，再来循环一次，来判断是否该减少工作线程
 
-# 11.Future
+# 12.Future
 
 java里Future的默认实现是FutureTask，将Callable作为构造器参数传入，就有了执行Callable的能力
 
-## 11.1 重点字段和主要方法：
+## 12.1 重点字段和主要方法：
 
 ```java
 // state字段，表示了当前Future的状态，取值为如下字段
@@ -839,15 +942,15 @@ private void finishCompletion() {
 }
 ```
 
-## 11.2 总结
+## 12.2 总结
 
 FutureTask根据内部的state字段来判断当前任务运行到了哪个阶段并作出对于的抉择。
 
 ​		如果想获取任务执行的结果，要使用get来获取结果，get是个阻塞的方法。当任务还未执行完毕时，会将调用get的方法阻塞并构造成WaitNode，再通过内部的next字段链接下一个WaitNode，形成一个链表结构。当任务执行完毕后，内部调用的finishCompletion方法会判断等待链表是否为空，不为空就代表有线程在获取结果时被阻塞了，这时唤醒阻塞队列的所有线程，最终，调用get方法的线程返回结果。
 
-# 12. ScheduledThreadPoolExecutor
+# 13. ScheduledThreadPoolExecutor
 
-## 12.1 ScheduledExecutorService
+## 13.1 ScheduledExecutorService
 
 ```java
 /**
@@ -885,7 +988,7 @@ public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command,
                                                  TimeUnit unit);
 ```
 
-## 12.2 DelayedWorkQueue
+## 13.2 DelayedWorkQueue
 
 ```java
 // 数组初始容量
@@ -985,7 +1088,7 @@ public RunnableScheduledFuture<?> take() throws InterruptedException {
 }
 ```
 
-## 12.3 ScheduledFutureTask
+## 13.3 ScheduledFutureTask
 
 ScheduledFutureTask继承了FutureTask，当向定时任务线程池投递任务时（Runnable或Callable），都会将其封装为ScheduledFutureTask
 
@@ -1097,17 +1200,54 @@ protected boolean runAndReset() {
 }
 ```
 
-## 12.4 总结
+## 13.4 总结
 
 [优秀的文章](https://segmentfault.com/a/1190000038371064)
 
-​		ScheduledThreadPoolExecutor本质还是个线程池，**内部的DelayedWorkQueue就是工作队列。投递的定时任务都会封装为ScheduledFutureTask，并最终放入DelayedWorkQueue里的那个数组**
+​		ScheduledThreadPoolExecutor本质还是个线程池，**内部的DelayedWorkQueue就是工作队列。投递的定时任务和普通任务都会封装为ScheduledFutureTask，并最终放入DelayedWorkQueue里的那个数组（只不过定时任务有延时，可能会放在队列中的任何位置。而普通任务封装的ScheduledFutureTask执行时间就是当前而已，始终会放到队列的队首并立马执行）**
 
 ​		DelayedWorkQueue实现了BlockingQueue，是基于**数组的最小顶堆的数据结构**实现，以此**保证数组的第一个位置就是最近需要被执行的任务**。
 
-​		ScheduledThreadPoolExecutor还使用了**Leader-Follower模式**，leader线程定时等待第一个任务，其余线程一般就都无限期等待（如果向工作队列添加的是一个最快需要被执行的任务，可能就有多个定时等待的线程，但leader线程始终都会是最快需要被执行任务的线程）
+​		ScheduledThreadPoolExecutor还使用了**Leader-Follower模式**，leader线程定时等待工作队列中第一个任务，其余线程一般就都无限期等待（如果向工作队列添加的是一个最快需要被执行的任务，可能就有多个定时等待的线程，但leader线程始终都会是最快需要被执行任务的线程）。
+
+**为什么使用Leader-Follower模式：**
+
+> ​		避免资源的浪费。定时任务再怎么排序，也只会有一个是最快需要执行的任务（时间相同会根据sequenceNumber排序），只需要设计一个定时等待线程等待这个最快需要执行的任务。当这个最快需要执行的任务触发后，再设计一个新的leader线程等待下一个最近的定时任务。理想的情况下，定时任务线程池只会有一个定时等待的线程（Leader线程），其余线程要么正在运行定时任务，要么全部无限期阻塞（Follower线程），最大程度的避免资源浪费（无限期等待的线程不用想其它的，乖乖等待被其他线程唤醒就行。而定时等待的线程需要在时间到达后被唤醒，至少需要被定时器监视以用来执行唤醒操作）
 
 - **固定周期**：受执行时常影响，只有当任务结束后才相对于结束时间来计算任务的下次执行时间
 - **固定频率**：不受任务的执行时常所影响，当任务投递到队列时就可以预判到以后任何执行该任务的时间
 
 ​	一个被投递的周期任务首先会封装成ScheduledFutureTask，再根据其下次执行时间放在DelayedWorkQueue的某个位置。如果放在了DelayedWorkQueue的队首，则使用定时任务线程池里的线程超时等待，以便时间到达后开始执行。正常执行完毕则会先根据其是固定周期任务还是固定频率的任务来计算下次执行时间并修赋值到ScheduledFutureTask的time字段，再将这个任务再次入队列，这样递归去执行。执行中如果抛出了异常，则会将ScheduledFutureTask的state修改为异常，之后就不再执行这个任务了
+
+# 14. CopyOnWriteArrayList
+
+​		线程安全的List，写时复制List，顾名思义，就是在修改元素时（添加，删除等操作），使用新的数组来添加或删除，原内部数组在设置后就再也不会修改内部的数据结构了。
+
+​		所以，这种数据结构**适合用在很少修改元素，大量读取元素的多线程并发操作的场合**
+
+主要字段和方法
+
+```java
+// 数据修改时用到的互斥锁
+final transient ReentrantLock lock = new ReentrantLock();
+
+// 数组实现，并使用volatile保持多线程对array的可见性
+private transient volatile Object[] array;
+
+// 添加元素
+public boolean add(E e) {
+    final ReentrantLock lock = this.lock;
+    lock.lock(); // 加互斥锁
+    try {
+        // 原数组不会修改，每次都新建一个数组，在将array字段替换为新数组
+        Object[] elements = getArray();
+        int len = elements.length;
+        Object[] newElements = Arrays.copyOf(elements, len + 1);
+        newElements[len] = e;
+        setArray(newElements);
+        return true;
+    } finally {
+        lock.unlock();
+    }
+}
+```
