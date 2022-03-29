@@ -46,7 +46,7 @@
 
 ### 1.设置mandatory
 
-设置Basic.Publish的mandatory为true，不接受不可路由的笑嘻嘻
+设置Basic.Publish的mandatory为true，不接受不可路由的消息
 
 ### 2.轻量级事务：发布确认
 

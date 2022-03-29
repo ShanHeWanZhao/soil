@@ -8,7 +8,7 @@ SeataAutoConfiguration中的GlobalTransactionScanner，主要用来代理@Global
 
 ### 1.2 相关表
 
-- **undo_log**：客户端的表，保存修改数据sql操作前后镜像值，主要用于全局事务回滚是构造回滚sql来回滚数据
+- **undo_log**：客户端的表，保存修改数据sql操作前后镜像值，主要用于全局事务回滚来构造回滚sql以回滚数据
 - **global_session**：服务端表，每一条记录都代表一个全局事务
 - **branch_session**：服务端表，每一条记录都代表一个从客户端注册的分支事务
 - **lock_table**：服务端表，客户端在全局事务期间修改的数据，每一条记录了某个数据库每个表的具体某个行的主键值，用在多个全局事务期间解决写冲突。

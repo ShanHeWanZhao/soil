@@ -78,42 +78,224 @@
 
 #### 3.1.3 AnnotationAwareAspectJAutoProxyCreator（非常重要）
 
-spring实现动态代理的Bean后置处理器
+​		Spring实现动态代理的Bean后置处理器，具有最高的执行优先级（表示是最先被执行的BeanPostProcessor。设置最高优先级的代码在org.springframework.aop.config.AopConfigUtils#registerOrEscalateApcAsRequired中）。其父类的postProcessAfterInitialization方法用在bean初始化（各种初始化方法调用完）后调用，用来判断当前bean是否能被增强，如果能则构建Advisor链，并使用ProxyFactory对其增强，增强后返回的bean已经是一个新的代理bean了。
 
 **Advisor**：增强器，一个Advisor对应一个切面。既包含Advice，也包含过滤器（判断bean是否需要增强的东西），所以能用一个Advisor来判断任意一个bean是否能被它增强，并提供增强的Advice。
 
-AbstractAutoProxyCreator#postProcessAfterInitialization方法，在bean初始化（各种初始化方法调用完）后调用，用来增强bean，返回的bean可能已经是一个新的代理bean了。
+**postProcessAfterInitialization方法**：找到能对这个bean进行增强的Advisor，利用ProxyFactory增强这个bean。ProxyFactory是创建代理bean的核心，代理bean创建出来就是一个新的bean，新的bean只提供切面逻辑的实现，用到原始bean的方法时，还是会交给原始bean去执行，原始bean并没有做任何改变，将原来的bean封装为TargetSource以供去执行真正的原始方法。
 
-该方法作用：找到能对这个bean进行增强的Advisor，并增强这个bean
+**判断能否对bean增强阶段：**
 
-> 判断能否对bean增强阶段：
+* 1. 获取容器中所有的Advisor（既有spring的，也有我们定·义的）
+     * @EnableTransactionManagement注解导入的BeanFactoryTransactionAttributeSourceAdvisor，专门用来处理事物注解的
+     * @EnableCaching注解导入的BeanFactoryCacheOperationSourceAdvisor，专门用来处理spring提供的缓存注解
+     * 自定的：我们自己用@org.aspectj.lang.annotation.Aspect注解定义的切面类，org.springframework.aop.aspectj.annotation.AspectJAdvisorFactory#getAdvisors方法用来将@Aspect注解定义的切面类解析为一系列的Advisor，一个注解切面对应一个InstantiationModelAwarePointcutAdvisorImpl（Advisor的实现类）
+  2. 用这些Advisor，依次对bean进行匹配，IntroductionAdvisor只需匹配类（ClassFilter），PointcutAdvisor既需匹配类（ClassFilter），也需要匹配方法（MethodMatcher）。只要能匹配上，就代表这个bean可以用这个Advisor进行增强。再收集到能对当前bean进行增强的Advisor，准备下一步的增强
+
+##### 3.1.3.1 cglib增强
+
+```java
+// CglibAopProxy的创建代理方法
+public Object getProxy(@Nullable ClassLoader classLoader) {
+   if (logger.isTraceEnabled()) {
+      logger.trace("Creating CGLIB proxy: " + this.advised.getTargetSource());
+   }
+
+   try {
+      // 上一个被代理的目标类class（有可能已经是cglib的代理类了）
+      Class<?> rootClass = this.advised.getTargetClass();
+      Assert.state(rootClass != null, "Target class must be available for creating a CGLIB proxy");
+      // 真正代理的目标类class
+      Class<?> proxySuperClass = rootClass;
+      if (ClassUtils.isCglibProxyClass(rootClass)) { // 已经是个cglib代理类了，就需要把真正被代理类的class和接口找出来
+         proxySuperClass = rootClass.getSuperclass();
+         Class<?>[] additionalInterfaces = rootClass.getInterfaces();
+         for (Class<?> additionalInterface : additionalInterfaces) {
+            this.advised.addInterface(additionalInterface);
+         }
+      }
+
+      // 验证class的final相关方法并写日志
+      validateClassIfNecessary(proxySuperClass, classLoader);
+
+      // 创建通用的增强器，准备增强了
+      Enhancer enhancer = createEnhancer();
+      if (classLoader != null) {
+         enhancer.setClassLoader(classLoader);
+         if (classLoader instanceof SmartClassLoader &&
+               ((SmartClassLoader) classLoader).isClassReloadable(proxySuperClass)) {
+            enhancer.setUseCache(false);
+         }
+      }
+      // 设置被代理类class为增强类的父类
+      enhancer.setSuperclass(proxySuperClass);
+      // 对增强类设置接口：Advised和SpringProxy
+      enhancer.setInterfaces(AopProxyUtils.completeProxiedInterfaces(this.advised));
+      enhancer.setNamingPolicy(SpringNamingPolicy.INSTANCE);
+      enhancer.setStrategy(new ClassLoaderAwareUndeclaredThrowableStrategy(classLoader));
+
+      // 设置拦截器（真正支持切面操作的拦截器）
+      Callback[] callbacks = getCallbacks(rootClass);
+      Class<?>[] types = new Class<?>[callbacks.length];
+      for (int x = 0; x < types.length; x++) {
+         types[x] = callbacks[x].getClass();
+      }
+
+      // 非常重要，就是通过这个filter来确定某个方法应该使用哪一个Callback的
+      // 所以，代理类的任何一个方法只会用上一个Callback
+      enhancer.setCallbackFilter(new ProxyCallbackFilter(
+            this.advised.getConfigurationOnlyCopy(), this.fixedInterceptorMap, this.fixedInterceptorOffset));
+      enhancer.setCallbackTypes(types);
+
+      // 生成代理类的class并实例化其对象
+      return createProxyClassAndInstance(enhancer, callbacks);
+   }
+   catch (CodeGenerationException | IllegalArgumentException ex) {
+      throw new AopConfigException("Could not generate CGLIB subclass of " + this.advised.getTargetClass() +
+            ": Common causes of this problem include using a final class or a non-visible class",
+            ex);
+   }
+   catch (Throwable ex) {
+      // TargetSource.getTarget() failed
+      throw new AopConfigException("Unexpected AOP exception", ex);
+   }
+}
+```
+
+> cglib的增强实现主要步骤总结：
+> 1. 校验final方法（只是打个日志，final方法不能增强）
 >
-> * 1. 获取容器中所有的Advisor（既有spring的，也有我们定义的）
->      * @EnableTransactionManagement注解导入的BeanFactoryTransactionAttributeSourceAdvisor，专门用来处理事物注解的
->      * @EnableCaching注解导入的BeanFactoryCacheOperationSourceAdvisor，专门用来处理spring提供的缓存注解
->      * 自定的：我们自己用@org.aspectj.lang.annotation.Aspect注解定义的切面类，org.springframework.aop.aspectj.annotation.AspectJAdvisorFactory#getAdvisors方法用来将@Aspect注解定义的切面类解析为一系列的Advisor，一个注解切面对应一个InstantiationModelAwarePointcutAdvisorImpl（Advisor的实现类）
->   2. 用这些Advisor，依次对bean进行匹配，IntroductionAdvisor只需匹配类（ClassFilter），PointcutAdvisor既需匹配类（ClassFilter），也需要匹配方法（MethodMatcher）。只要能匹配上，就代表这个bean可以用这个Advisor进行增强。再收集到能对当前bean进行增强的Advisor，准备下一步的增强
+> 2. 创建**org.springframework.cglib.proxy.Enhancer**（核心的cglib增强器）
 >
-> 增强bean阶段（创建bean的代理）：
+> 3. 对Enhancer进行一系列的填充，包括设置当前Class为增强类的父类。当前Class的所有接口，增强类也要实现。
 >
-> * 1. ProxyFactory是创建代理bean的核心，代理bean创建出来就是一个新的bean，新的bean只提供切面逻辑的实现，用到原始bean的方法时，还是会交给原始bean去执行，原始bean并没有做任何改变，将原来的bean封装为TargetSource以供去执行真正的原始方法。
->   2. 开始增强
->      * cglib的实现（**CglibAopProxy#getProxy(java.lang.ClassLoader)**）：
->        * 1. 校验final方法（只是打个日志，final方法不能增强）
->          
->          2. 创建**org.springframework.cglib.proxy.Enhancer**（核心的cglib增强器）
->          
->          3. 对Enhancer进行一系列的填充，包括设置当前Class为增强类的父类。当前Class的所有接口，增强类也要实现。
->          
->          4. **对Enhancer设置一些Callback，并设置固定的CallbackFilter（ProxyCallbackFilter）。**非常重要：
->          
->             ![Callback数组](img/cglib_callbacks.png)
->          
->             ​									Callback数组（每一个Callback都是方法的拦截器）
->          
->             ![Callback数组索引](img/callback_index.png)
->          
->             ​									Callback数组的索引（**ProxyCallbackFilter#accept**实现），用来确定被增强的类的每一个方法该使用具体的某个拦截器，返回的是拦截器的数组索引
+> 4. 设置增强Class的命名策略（BySpringCGLIB）
+>
+> 5. 默认再将当前线程上下文的ClassLoader设为加载增强Class字节码的ClassLoader
+>
+> 6. **对Enhancer设置一些Callback，并设置固定的CallbackFilter（ProxyCallbackFilter）。**非常重要：
+>
+>    ![Callback数组](img/cglib_callbacks.png)
+>
+>    ​									Callback数组（每一个Callback都是方法的拦截器）
+>
+>    ![Callback数组索引](img/callback_index.png)
+>
+>    ​									Callback数组的索引（**ProxyCallbackFilter#accept**实现），用来确定被增强的类的每一个方法该使用具体的某个拦截器，返回的是拦截器的数组索引
+>
+> 7. 生成增强Class的字节码并实例化（代理bean就产生了），将其返回
+>
+> ​	利用Arthas的反编译字节码命令（jad），可以发现cglib的源码里当调用任意一个方法时，使用的就是对应的Callback数组里的某个具体Callback。至于如何将Callback数组里的Callback应用到具体的方法中，就是上面说的ProxyCallbackFilter需要做的事（实现都在org.springframework.aop.framework.CglibAopProxy.ProxyCallbackFilter#accept方法里）。
+
+**cglib代理类中方法有切面时的调用重点流程分析（这时使用的Callback就是DynamicAdvisedInterceptor）**：
+
+- 根据org.springframework.aop.framework.AdvisorChainFactory#getInterceptorsAndDynamicInterceptionAdvice方法，对原始Method创建拦截器链（就是将所有的Advisor依次利用其中的ClassFilter和MethodMatcher对当前方法的Class和当前方法进行比对，能进行拦截就保存起来，最终缓存该方法对应的所有可用Advisor）
+- 存在拦截器就会构造为CglibMethodInvocation，CglibMethodInvocation继承了ReflectiveMethodInvocation，先调用ReflectiveMethodInvocation#proceed方法，切面实现中如果继续调用proceed方法就会再回到ReflectiveMethodInvocation#proceed中，根据当前ReflectiveMethodInvocation中的拦截器索引（currentInterceptorIndex字段）拿到下一个增强器，依次这么反复传递下去。当拦截器调用完毕后，最后再调用原始bean的原始方法。
+
+```java
+// DynamicAdvisedInterceptor的入口
+@Override
+@Nullable
+public Object intercept(Object proxy, Method method, Object[] args, MethodProxy methodProxy) throws Throwable {
+   Object oldProxy = null;
+   boolean setProxyContext = false;
+   Object target = null;
+   // 先准备目标对象源（调用原bean方法时会用到）
+   TargetSource targetSource = this.advised.getTargetSource();
+   try {
+      if (this.advised.exposeProxy) {
+         // 在当前线程上下文中设置了需要暴露代理，就要设置到当前线程ThreadLocal中
+         // 就是用来解决方法内部需要调用代理方法
+         oldProxy = AopContext.setCurrentProxy(proxy);
+         setProxyContext = true;
+      }
+      // 获取真实的，不是代理的目标对象
+      // 例：Session域从SimpleBeanTargetSource中获取，再转到BeanFactory，再转到SessionScope中，获取目标对象
+      target = targetSource.getTarget();
+      Class<?> targetClass = (target != null ? target.getClass() : null);
+      // 对当前方法构造切面链并缓存
+      List<Object> chain = this.advised.getInterceptorsAndDynamicInterceptionAdvice(method, targetClass);
+      Object retVal;
+      // 无切面，且方法为public，直接调用原方法
+      if (chain.isEmpty() && Modifier.isPublic(method.getModifiers())) {
+
+         Object[] argsToUse = AopProxyUtils.adaptArgumentsIfNecessary(method, args);
+         retVal = methodProxy.invoke(target, argsToUse);
+      }
+      else { // 存在切面，构造方法调用器并执行
+         // We need to create a method invocation...
+         retVal = new CglibMethodInvocation(proxy, target, method, args, targetClass, chain, methodProxy).proceed();
+      }
+      retVal = processReturnType(proxy, target, method, retVal);
+      return retVal;
+   }
+   finally {
+      if (target != null && !targetSource.isStatic()) {
+         targetSource.releaseTarget(target);
+      }
+      if (setProxyContext) { // 方法代理全部执行完毕，恢复执行前的现场
+         // Restore old proxy.
+         AopContext.setCurrentProxy(oldProxy);
+      }
+   }
+}
+// =========================ReflectiveMethodInvocation#proceed方法====================
+// 进行动态增强器的匹配判断，执行拦截器，和传播的实现
+public Object proceed() throws Throwable {
+    // We start with an index of -1 and increment early.
+    // 执行完所有增强方法后执行切点方法
+    if (this.currentInterceptorIndex == this.interceptorsAndDynamicMethodMatchers.size() - 1) {
+        return invokeJoinpoint();
+    }
+
+    // 获取下一个要执行的拦截器
+    Object interceptorOrInterceptionAdvice =
+        this.interceptorsAndDynamicMethodMatchers.get(++this.currentInterceptorIndex);
+    // 调用拦截器方法时，都需要将this作为参数传递以保证当前拦截能传播给后面的增强器（proceed方法）
+    
+    if (interceptorOrInterceptionAdvice instanceof InterceptorAndDynamicMethodMatcher) { 		// 动态匹配的增强器，需要进行动态参数匹配
+        InterceptorAndDynamicMethodMatcher dm =
+            (InterceptorAndDynamicMethodMatcher) interceptorOrInterceptionAdvice;
+        Class<?> targetClass = (this.targetClass != null ? this.targetClass : this.method.getDeclaringClass());
+        if (dm.methodMatcher.matches(this.method, targetClass, this.arguments)) { // 匹配，执行拦截器
+            return dm.interceptor.invoke(this);
+        }
+        else {
+            // Dynamic matching failed.
+            // Skip this interceptor and invoke the next in the chain.
+            // 匹配失败就不执行拦截器，触发下一个拦截器的判断和执行
+            return proceed();
+        }
+    }
+    else { 
+        // 非动态拦截器，比如事务的TransactionInterceptor，和异步的		AnnotationAsyncExecutionInterceptor等等
+        return ((MethodInterceptor) interceptorOrInterceptionAdvice).invoke(this);
+    }
+}
+```
+
+
+
+##### 3.1.3.2 jdk增强
+
+```java
+// JdkDynamicAopProxy的创建代理方法，该代理的InvocationHandler就为JdkDynamicAopProxy本身
+public Object getProxy(@Nullable ClassLoader classLoader) {
+   if (logger.isTraceEnabled()) {
+      logger.trace("Creating JDK dynamic proxy: " + this.advised.getTargetSource());
+   }
+   // 对增强类设置接口：Advised和SpringProxy和DecoratingProxy
+   Class<?>[] proxiedInterfaces = AopProxyUtils.completeProxiedInterfaces(this.advised, true);
+   findDefinedEqualsAndHashCodeMethods(proxiedInterfaces);
+   return Proxy.newProxyInstance(classLoader, proxiedInterfaces, this);
+}
+```
+
+##### 3.1.3.3 总结
+
+​		不论是cglib还是jdk的增强，增强的实现都可以总结为对原方法可使用的Advisor的收集，再构造成ReflectiveMethodInvocation（每次调用拦截方法时都会构造一个ReflectiveMethodInvocation），由ReflectiveMethodInvocation去进行动态增强器（一般都和参数有关）的判断，执行拦截器和拦截的传播。
+
+​		且Spring都会默认对代理bean实现两个接口（代码实现在AopProxyUtils#completeProxiedInterfaces中），分别是**SpringProxy和Advised**。SpringProxy用来表示当前bean已经被spring的增强了，而Advised则可以用来拿到原始bean（所以，要在代理bean中拿到原始bean，直接将代理bean强转为Advised，再利用其getTargetSource方法得到原始非代理bean）
 
 #### 3.1.4 AsyncAnnotationBeanPostProcessor
 
@@ -125,9 +307,9 @@ AbstractAutoProxyCreator#postProcessAfterInitialization方法，在bean初始化
 
 ### 3.3 BeanFactoryPostProcessor和BeanDefinitionRegistryPostProcessor
 
-* **ConfigurationClassPostProcessor（非常重要，一切的开始）**
+#### 3.3.1 ConfigurationClassPostProcessor（非常重要，一切的开始）
 
-功能：处理**@Configuration、@PropertySource、@ComponentScan、@Import、@ImportResource、@Bean、@Conditional**等重要注解
+​		实例化AnnotatedBeanDefinitionReader的构造方法中，就会构造一个ConfigurationClassPostProcessor的BeanDefinition并注册到容器中，等待容器refresh阶段处理BeanFactoryPostProcessor时调用，用来处理**@Configuration、@PropertySource、@ComponentScan、@Import、@ImportResource、@Bean、@Conditional**等重要注解，**最终的目的就是注册所有的BeanDefinition（包括包扫描、@Bean导入的、内部类配置、自动配置、导入的xml配置等等）等待这些BeanDefinition后续的使用。整个ConfigurationClassPostProcessor处理容器bean就是递归，直到没有组件为止（新扫描出来的容器组件它完全可能又导入其他组件）**
 
 **@Configuration增强**：被@Configuration标注的类，被叫做**full Configuration class**，spring会对这种类进行增强，将这个类中标注了@Bean的方法进行拦截（**BeanMethodInterceptor**拦截），调用@Bean方法时会从BeanFactory中获取bean，这样就不用担心本类中调用@Bean方法而导致生成了多个bean。这个类的增强和aop增强有区别，并不是包装关系，而是完全在@Configuration标注的类的基础上，对这个Class进行代理，只有这样才能保证本类方法调用才会走代理，才会从BeanFactory中获取bean，而不用担心多创建了对象。
 
@@ -141,15 +323,15 @@ AbstractAutoProxyCreator#postProcessAfterInitialization方法，在bean初始化
 4. 处理@ComponentScan和@ComponentScans注解，并对解析出来的BeanDefinition进行递归解析
    1. 扫描指定包下的所有组件时，通过路劲搜索，将指定包下的所有Class文件每个都封装为org.springframework.core.io.Resource对象（此时还没加载这个Class）。
    2. 利用ASM，将Class文件读取到内存里进行解析
-   3. 判断是否能成为一个BeanDefinition（比如是否被@Component注解标注，是否被排除等等）
-   4. 将合格的BeanDefinition返回
-   5. 为什么要用ASM，而不是直接加载这个Class：因为在Class加载前，我们还不确定他是否会被容器管理，甚至它都不会被被使用，一个从来不被使用的Class文件，我们就没必要加载到虚拟机里了，所以利用ASM，直接解析它的字节码文件，看看是否包含指定的注解，在加载到虚拟机中
-5. 处理@Import注解。这个注解就经常用在各种@Enable...前缀开头的注解里，用来导入指定的BeanDefinition来开启某种功能。**DeferredImportSelector是一种特别的Import，用来延迟导入。**在springboot种@EnableAutoConfiguration注解就是导入的实现DeferredImportSelector的类。**DeferredImportSelector专门用在最后才处理（等解析都处理完了后）**，为什么有这个，不妨设想一下，如果你要自己配置一个DataSource的bean，但容器中只允许存在一个，而springboot的DataSourceAutoConfiguration也帮你准备了一个DataSource，这时@ConditionalOnMissingBean注解可以发挥作用，但如果不是DeferredImportSelector起作用了，你就不能保证解析顺序，可能就忽略了你的DatsSource，而使用DataSourceAutoConfiguration里的了。所以重点：**我们没必要担心自动配置和我们的配置解析的顺序问题，始终都是我们配置的会先被解析，所以，我们可以放心的做一些定制来覆盖自动配置里的Bean。**
-6. 处理@ImportResource注解
+   3. 判断是否能成为一个BeanDefinition（比如是否被指定的注解标注，spring默认用的时@Component，而我们可以灵活配置扫描指定的注解（比如mybatis中@Mapper的扫描，feign接口的@FeignClient扫描）。是否需要被排除等等）
+   4. 返回合格的BeanDefinition数组，交由调用者处理
+   5. **为什么要用ASM，而不是直接加载这个Class**：因为在Class加载前，我们还不确定他是否会被容器管理，甚至它都不会被被使用，一个从来不被使用的Class文件，我们就没必要加载到虚拟机里了，所以利用ASM，直接解析它的字节码文件，看看是否包含指定的注解，在加载到虚拟机中
+5. 处理@Import注解。这个注解就经常用在各种@Enable...前缀开头的注解里，用来导入指定的BeanDefinition来开启某种功能。**DeferredImportSelector是一种特别的Import，用来延迟导入。**在springboot种@EnableAutoConfiguration注解就是导入的实现DeferredImportSelector的类。**DeferredImportSelector专门用在最后才处理（等解析都处理完了后）**。为什么有这个，不妨设想一下，如果你要自己配置一个DataSource的bean，但容器中只允许存在一个，而springboot的DataSourceAutoConfiguration也帮你准备了一个DataSource，这时@ConditionalOnMissingBean注解可以发挥作用，但如果不是DeferredImportSelector起作用了，你就不能保证解析顺序，可能就忽略了你的DatsSource，而使用DataSourceAutoConfiguration里的了。所以重点：**我们没必要担心自动配置和我们的配置解析的顺序问题，始终都是我们配置的会先被解析，所以，我们可以放心的做一些定制来覆盖自动配置里的Bean。**
+6. 处理@ImportResource注解（xml配置文件导入的bean）
 7. 处理带有@Bean注解的类
-8. 处理第6点提到的DeferredImportSelector
+8. 上面的所有组件递归处理完毕后，再处理第5点提到的DeferredImportSelector。springboot里开启自动装配的注解@EnableAutoConfiguration就会导入AutoConfigurationImportSelector，用来导入jar包下META-INF/spring.factories里自动装配的bean
 
-等解析完后，就将@Bean注解标注的方法封装为BeanDefinition放入容器中，等待后续的实例化
+等解析完后，按解析顺序（LinkedHashMap维持的解析顺序）就将每个ConfigurationClass里导入的其他BeanDefinition放入容器中，等待后续的实例化（@Bean、@ImportResource、@Import等注解导入的BeanDefinition)
 
 
 
@@ -157,9 +339,11 @@ AbstractAutoProxyCreator#postProcessAfterInitialization方法，在bean初始化
 
 ### 4.1 @Transactional
 
-#### 4.1.1 由BeanFactoryTransactionAttributeSourceAdvisor进行代理，具体的拦截器：TransactionInterceptor
+#### 4.1.1 BeanFactoryTransactionAttributeSourceAdvisor
 
-步骤
+​		由**@EnableTransactionManagement**注解开启，该注解导入了ProxyTransactionManagementConfiguration，而ProxyTransactionManagementConfiguration内提供了**BeanFactoryTransactionAttributeSourceAdvisor、TransactionAttributeSource、TransactionInterceptor**三个Bean。BeanFactoryTransactionAttributeSourceAdvisor为事务注解的Advisor，封装了后面的两个TransactionAttributeSource、TransactionInterceptor。**TransactionAttributeSource用在TransactionAttributeSourcePointcut中来解析事务注解，再bean初始化后来判断是否有事务注解并且对事物注解进行解析，而TransactionInterceptor则用在事务方法执行时来实时具体的拦截**
+
+TransactionInterceptor执行的步骤
 
 > 1. 将@Transactional注解封装为TransactionAttribute
 > 2. 获取BeanFactory中的PlatformTransactionManager（可以由@Transactional指定）

@@ -222,8 +222,8 @@ public Object invoke(Object proxy, Method method, Object[] args) throws Throwabl
 - 由于mapper对象是动态代理生成的，所以调用mapper里的任何接口都会走到**org.apache.ibatis.binding.MapperProxy#invoke**方法
 - 对当前方法解析并封装成MapperMethod对象然后缓存起来，调用execute方法执行
 - **select类型的方法都会走Executor#query方法**，Executor#query方法逻辑
-  - 查询二级缓存，名中则返回缓存之，没有则向下继续查询
-  - 查询一级缓存，名中则返回缓存之，没有则向下继续查询（走到**BaseExecutor#doQuery**方法）
+  - 查询二级缓存，命中就返回缓存，没有则向下继续查询
+  - 查询一级缓存，命中就返回缓存，没有则向下继续查询（走到**BaseExecutor#doQuery**方法）
   - 根据实现类查询，默认是SimpleExecutor的doQuery方法
   - 创建StatementHandler，利用TypeHandler#setParameter方法将参数设置到PreparedStatement里
   - 执行PreparedStatement

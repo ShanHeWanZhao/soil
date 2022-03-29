@@ -120,13 +120,13 @@ void flush(ChannelHandlerContext ctx) throws Exception;
 
 ### 3.1 HeadContext
 
-​		同时实现了ChannelInboundHandler，是处理入站事件的源头，所有入站事件的触发都将从HeadContext发起，将事件一次向后传播，然后走过我们配置的所有ChannelInboundHandler，直到tail结束
+​		同时实现了ChannelInboundHandler，是处理入站事件的源头，所有入站事件的触发都将从HeadContext发起，将事件依次向后传播，然后走过我们配置的所有ChannelInboundHandler，直到tail结束
 
 ​		同时**HeadContext也实现了ChannelOutboundHandler，也是出站事件的末尾。内部有个Unsafe对象，Unsafe对象封装了真正的IO操作，比如绑定本地端口，连接服务器，关闭操作等。所以，出站事件（比如bind到本地端口，connect到远程端口等）从tail出发，一直传到head，再由head的Unsafe对象进行真正的绑定和连接IO操作**
 
 ### 3.2 TailContext
 
-​		实现了ChannelInboundHandler接口，作为入站事件的末尾来处理对应的入站事件（**基本都是不做什么，或者打个日志而已**）。所以，入站事件的异常如果不做任何处理，继续向后传播的话，最终也只会记录日志，并不会抛出异常
+​		实现了ChannelInboundHandler接口，作为入站事件的末尾来处理对应的入站事件（**基本都是不做什么，或者打个日志而已**）。例如，入站事件的异常（exceptionCaught接口）如果不做任何处理，继续向后传播的话，最终也只会记录日志，并不会抛出异常
 
 ​		且间接实现了ChannelOutboundInvoker，所以具有调用出站事件接口的能力。
 
@@ -193,7 +193,7 @@ private volatile int handlerState = INIT;
 
 ​		EventLoopGroup实现了ScheduledExecutorService接口，并提供了将Channel注册到EventLoop的接口。
 
-​		**EventLoopGroup可以类比为线程池。作为管理EventLoop的组件，在NioEventLoopGroup中，利用构造函数实例化了[n个处理器 * 2]个EventLoop，EventLoopGroup的线程池接口和注册Channel接口等的实现都是依赖EventLoop去处理的，EventLoopGroup实际上只提供选择哪个EventLoop去执行注册或任务而已（默认时轮询）**
+​		**EventLoopGroup可以类比为线程池。作为管理EventLoop的组件，在NioEventLoopGroup中，利用构造函数实例化了[n个处理器 * 2]个EventLoop，EventLoopGroup的线程池接口和注册Channel接口等的实现都是依赖EventLoop去处理的，EventLoopGroup实际上只提供选择哪个EventLoop去执行注册或任务而已（默认是轮询）**
 
 ### 5. 1 EventLoop
 
@@ -259,11 +259,13 @@ PriorityQueue<ScheduledFutureTask<?>> scheduledTaskQueue;
 
 ​		NioEventLoop提供了Channel注册和运行对应的事件，也提供了线程池的执行Runnable和定时任务线程池的运行定时任务的能力。**NioEventLoop在执行Runnable方法中，会先将Runnable扔进taskQueue中，在启动当前EventLoop线程，运行到io.netty.channel.nio.NioEventLoop#run方法进入死循环**（所以它是单线程）。
 
-**NioEventLoop的run方法主要逻辑**：
+**NioEventLoop的run方法主要逻辑（一次事件循环）**：
 
-- **在一个死循环里运行选择器监听感兴趣的事件（超时等待），如果有准备好的IO事件或任务队列和定时任务队列存在任务时或被用户唤醒是，就跳出循环**
+- **在一个死循环里运行选择器监听感兴趣的事件（超时等待），如果有准备好的IO事件或任务队列和定时任务队列存在任务时或被用户唤醒时，就跳出循环**
 - **先处理IO事件（选择器准备就绪的事件，一般就是服务器接受连接或通道可读事件）**
-- **再处理taskQueue中的任务和scheduledTaskQueue中的定时任务（依次将scheduledTaskQueue中运行时间到达的定时任务转入到taskQueue中，并最终根据ioRation的配置来计算能运行taskQueue中任务的事件并以此运行taskQueue中的任务）**
+- **再处理taskQueue中的任务和scheduledTaskQueue中的定时任务（依次将scheduledTaskQueue中运行时间到达的定时任务转入到taskQueue中，并最终根据ioRation的配置来计算能运行taskQueue中任务的事件并以此运行taskQueue中的任务）。尽管ioRation是用来计算非IO任务的可执行时间，但当前版本还是会每执行64个Runnable才检查可执行时间是否用完，所以，就算ioRation设置的再大，在一次轮询中也至少会执行64个我们投递的Runnable（或定时任务），官方的解释时觉得System.nanoTime()花费昂贵，不应该每执行一个Runnable就去判断时间**
+- 执行Runnable运行完的钩子函数，也就是一次事件循环结束后需要执行的Runnable，这些Runnable保存在io.netty.channel.SingleThreadEventLoop#tailTasks里
+- 事件循环的末尾总要**判断当前NioEventLoop是否SHUTDOWN**（根据**SingleThreadEventExecutor#state**字段判断）。如果shutdown，则close当前NioEventLoop所持有的所有Channel，并取消所有定时任务，再执行完毕所有普通Runnable任务，在执行ShutdownHook等等
 
 **所以，ServerSocketChannel接受连接和SocketChannel读取数据的触发点都在上面的IO事件处理中**
 
@@ -278,7 +280,7 @@ PriorityQueue<ScheduledFutureTask<?>> scheduledTaskQueue;
 AbstractBootstrap是启动类的实现抽象，定义了客户端启动器和服务端启动器的公共部分，内部字段：
 
 ```java
-**
+/**
  * 对于服务端的socket来说是用来构建ServerSocketChannel，处理和客户端的连接事件 
  * 对于客户端的socket来说，是用来构建SocketChannel，处理和服务端的读写
  */
@@ -296,9 +298,9 @@ private volatile SocketAddress localAddress;
 private final Map<ChannelOption<?>, Object> options = new LinkedHashMap<ChannelOption<?>, Object>();
 private final Map<AttributeKey<?>, Object> attrs = new LinkedHashMap<AttributeKey<?>, Object>();
 /**
- * 当前socket类型产生的Channel会使用的ChannelHandler <p/>
- * 客户端：就是用在SocketChannel上的Handler <br/>
- * 服务端：使用在ServerSocketChannel上的Handler <br/>
+ * 当前socket类型产生的Channel会使用的ChannelHandler 
+ * 客户端：就是用在SocketChannel上的Handler 
+ * 服务端：使用在ServerSocketChannel上的Handler 
  * 因为这里只有一个ChannelHandler，所以最好使用ChannelInitializer，用来注册多个ChannelHandler
  */
 private volatile ChannelHandler handler;
@@ -325,7 +327,7 @@ private volatile EventLoopGroup childGroup;
 private volatile ChannelHandler childHandler;
 ```
 
-**bind方法主要逻辑**
+**服务端的启动流程（bind方法）主要逻辑**
 
 - 创建ServerSocketChannel实例
 - 设置我们配置的各种socket参数到ChannelConfig里
@@ -348,7 +350,7 @@ ServerBootstrapAcceptor实现了ChannelInboundHandler接口，能传播和处理
 
 ServerBootstrap启动客户端的工具，用于将我们设置的各种ChannelHandler、EventLoopGroup、socket参数等组合起来，最终启动。当配置好各种参数后，**调用connect方法，连接服务端**
 
-**connect方法主要逻辑：**
+**客户端启动流程（connect方法）主要逻辑：**
 
 - 反射创建SocketChannel实例
 - 添加handler、将我们配置的socket参数设置到ChannelConfig等
@@ -366,7 +368,7 @@ ServerBootstrap启动客户端的工具，用于将我们设置的各种ChannelH
 
 ​		客户端的Netty从创建EventLoopGroup开始，每个与服务端连接后产生的SocketChannel都将注册到NioEventLoopGroup中。NioEventLoopGroup是用来管理NioEventLoop的组件，在NioEventLoopGroup内部，NioEventLoopGroup将SocketChannel轮询的注册到内部的NioEventLoop中。每个NioEventLoop都是单线程的，既提供SocketChannel的IO处理，也提供线程池和定时任务的Runnable处理。**且在每个NioEventLoop中，都会创建自己的Selector，注册到NioEventLoop的SocketChannel或ServerSocketChannel都会把自己注册到这个Selector中，并监听感兴趣的事件（通过NioServerSocketChannel和NioSocketChannel的构造参数可知，感兴趣的事件分别是ACCEPT和READ）**。且在整个SocketChannel的生命周期内，它始终绑定在这个NioEventLoop里。
 
-​		服务端既要接受客户端的连接，又要处理从SocketChannel中读取数据和发送数据。所以，一般创建两个NioEventLoopGroup，boss group只用设置一个NioEventLoop线程，专门用来处理ServerSocketChannel的ACCEPT事件，并产生的SocketChannel注册到child group中。child group需要配置多个NioEventLoop线程，用来处理和客户端产生连接后的SocketChannel。
+​		服务端既要接受客户端的连接，又要处理从SocketChannel中读取数据和发送数据。所以，一般创建两个NioEventLoopGroup，boss group只用设置一个NioEventLoop线程，专门用来处理ServerSocketChannel的ACCEPT事件，并将产生的SocketChannel注册到child group中。child group需要配置多个NioEventLoop线程，用来处理和客户端产生连接后的SocketChannel。
 
 ​	**在NioEventLoop线程内部，线程一直死循环处理IO事件和Runnable任务，且根据内部的ioRation来分配处理时间**。从Channel注册后，Channel的整个生命周期都会在当前NioEventLoop中。所以，一个NioEventLoop可能管理多个SocketChannel。**同时，因为单线程处理IO事件和Runnable任务，所以，不要添加执行时间过长的Runnable，否则，都会影响到线程处理其他Channel的时间，特别是在IO事件频繁的情况下**
 
