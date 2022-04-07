@@ -1,8 +1,8 @@
-# OpenFeign(2.1.1)
+# 1 OpenFeign(2.1.1)
 
-## 1. feign接口的注册
+## 1.1 feign接口的注册
 
-### 1.1 @EnableFeignClients
+### 1.11 @EnableFeignClients
 
 ​		@EnableFeignClients使用@Import导入了FeignClientsRegistrar，@Import将在ConfigurationClassPostProcessor#postProcessBeanDefinitionRegistry方法中解析，并实例化对应import的配置类并调用对应的方法。FeignClientsRegistrar是用来设置默认的feign配置类和扫描@FeignClient，并将扫描出来带有@FeignClient注解的接口构造成FeignClientFactoryBean的BeanDefinition，注入到容器中，交给容器来实例化feign接口
 
@@ -147,7 +147,7 @@ private void registerFeignClient(BeanDefinitionRegistry registry,
 }
 ```
 
-### 1.2  NamedContextFactory -> FeignContext
+### 1.12  NamedContextFactory -> FeignContext
 
 ​		FeignContext是构造feign实例最重要的一部分，用来对不同服务进行配置隔离（Encoder，Decoder，Contract等重要组件）。FeignContext继承了NamedContextFactory，NamedContextFactory是用来
 
@@ -299,7 +299,7 @@ public abstract class NamedContextFactory<C extends NamedContextFactory.Specific
 }
 ```
 
-### 1.3 FeignClientsConfiguration
+### 1.13 FeignClientsConfiguration
 
 作为spring为我们提供的feign默认配置类，它内部提供了如下组件
 
@@ -344,7 +344,7 @@ public abstract class NamedContextFactory<C extends NamedContextFactory.Specific
   private ExceptionPropagationPolicy propagationPolicy = NONE;
   ```
 
-### 1.4 FeignClientFactoryBean的实例化
+### 1.14 FeignClientFactoryBean的实例化
 
 ​		每一个@FeignClient的接口都对应一个FeignClientFactoryBean，在容器refresh的最后阶段开始实例化，FeignClientFactoryBean是FactoryBean，实例化内部对象使用getObject方法
 
@@ -616,7 +616,7 @@ protected MethodMetadata parseAndValidateMetadata(Class<?> targetType, Method me
 
 没有被上面4个AnnotatedParameterProcessor解析到的方法参数就是非http注解相关参数，会将该参数设置为http请求体参数，同时会校验唯一性
 
-###  1.5 feign.MethodMetadata
+###  1.15 feign.MethodMetadata
 
 MethodMetadata是feign提供的feign接口方法解析的结果，每个feign接口对应一个MethodMetadata
 
@@ -656,7 +656,7 @@ public final class MethodMetadata implements Serializable {
 }
 ```
 
-### 1.6 feign代理的总结
+### 1.16 feign代理的总结
 
 ​		通过使用@EnableFeignClients默认扫描使用@EnableFeignClients类包下的所有@FeignClient接口，并将每个feign接口封装为FeignClientFactoryBean放入容器中，等待后续实例化。
 
@@ -664,9 +664,320 @@ public final class MethodMetadata implements Serializable {
 
 ​		feign的实例化是使用jdk动态代理。feign.ReflectiveFeign.ParseHandlersByName内负责解析feign接口，在内部通过Contract解析每个feign方法，每个feign方法被解析成feign.MethodMetadata模板。feign.SynchronousMethodHandler.Factory再将feign需要的组件和上一步生成的MethodMetadata构造为SynchronousMethodHandler，表示一个feign方法的处理器。当调用feign接口方法时，实际上就是在调用这个方法对应的SynchronousMethodHandler
 
-# Ribbon(2.1.1)
+# 2 Ribbon(2.1.1)
+
+​		Ribbon作为微服务的负载均衡部分，内部提供了一些列组件用来支持服务的节点选择、服务的心跳检测和服务列表动态更新等操作
+
+​		在RibbonAutoConfiguration自动配置类中，SpringClientFactory这个Bean内部有提供ribbon组件默认配置类RibbonClientConfiguration，RibbonClientConfiguration和FeignContext内部的feign组件默认配置类FeignClientsConfiguration原理是一样的，都是利用不同的容器对服务（不同的服务有自己专属的ApplicationContext）进行配置隔离。
+
+## 2.1 Ribbon主要组件
+
+​		**ribbon的默认主要组件由RibbonClientConfiguration提供，也可以通过@RibbonClient提供具体某个服务的配置，也可以使用@RibbonClients注解提供所有服务的默认组件。**
+
+​		**组件的优先级：@RibbonClient > @RibbonClients > RibbonClientConfiguration**。因为在org.springframework.cloud.context.named.NamedContextFactory#createContext方法里（创建各服务的配置容器），会按照上述顺序将配置类放入容器中，当ribbon的组件使用ConditionalOnMissingBean保持容器中该bean的唯一性时，配置类的顺序就变得非常重要了。
+
+- **com.netflix.loadbalancer.IRule**：**负载均衡算法，根据该算法从可用的服务列表中选择一个**。默认为com.netflix.loadbalancer.ZoneAvoidanceRule，**根据com.netflix.loadbalancer.Server的zone区域和可用性来轮询选择（所以如果Server的实现类没有zone，就是个简单的轮询算法）**
+- **com.netflix.loadbalancer.IPing**：**服务的心跳检测**（启动时会有个定时任务周期性的运行该检测算法）。默认为DummyPing，内部实现为通过，因为这个组件需要注册中心的支持，应该由注册中心提供。
+- **com.netflix.loadbalancer.ServerList**：**服务列表，该组件可获取可用的服务列表**。默认为ConfigurationBasedServerList，是一种自己配置的服务列表。这个组件也应该由注册中心提供
+- **com.netflix.loadbalancer.ServerListUpdater**：**服务列表动态更新组件**，默认实现为com.netflix.loadbalancer.**PollingServerListUpdater**，内部**默认使用核心数为2，线程名以PollingServerListUpdater-开头的ScheduledThreadPoolExecutor，以间隔时间为30秒来运行服务列表的更新任务**。
+- **com.netflix.loadbalancer.ServerListFilter**：**服务列表过滤器**，默认为org.springframework.cloud.netflix.ribbon.ZonePreferenceServerListFilter，一个和zone时区有关的服务过滤器。
+- **com.netflix.loadbalancer.ILoadBalancer**：**负载均衡器，负责管理上面5个组件，并对外暴露出选择服务和获取所有服务的接口**。默认实现类为com.netflix.loadbalancer.ZoneAwareLoadBalancer，是一种和zone时区有关的均衡器
+
+```java
+// ribbon提供的配置类
+@Bean
+@ConditionalOnMissingBean
+public IClientConfig ribbonClientConfig() {
+   DefaultClientConfigImpl config = new DefaultClientConfigImpl();
+   config.loadProperties(this.name);
+   config.set(CommonClientConfigKey.ConnectTimeout, DEFAULT_CONNECT_TIMEOUT);
+   config.set(CommonClientConfigKey.ReadTimeout, DEFAULT_READ_TIMEOUT);
+   config.set(CommonClientConfigKey.GZipPayload, DEFAULT_GZIP_PAYLOAD);
+   return config;
+}
+
+// 负载均衡算法
+@Bean
+@ConditionalOnMissingBean
+public IRule ribbonRule(IClientConfig config) {
+   if (this.propertiesFactory.isSet(IRule.class, name)) {
+      return this.propertiesFactory.get(IRule.class, config, name);
+   }
+   ZoneAvoidanceRule rule = new ZoneAvoidanceRule();
+   rule.initWithNiwsConfig(config);
+   return rule;
+}
+// 服务心跳检测
+@Bean
+@ConditionalOnMissingBean
+public IPing ribbonPing(IClientConfig config) {
+   if (this.propertiesFactory.isSet(IPing.class, name)) {
+      return this.propertiesFactory.get(IPing.class, config, name);
+   }
+   return new DummyPing();
+}
+// 服务列表
+@Bean
+@ConditionalOnMissingBean
+@SuppressWarnings("unchecked")
+public ServerList<Server> ribbonServerList(IClientConfig config) {
+   if (this.propertiesFactory.isSet(ServerList.class, name)) {
+      return this.propertiesFactory.get(ServerList.class, config, name);
+   }
+   ConfigurationBasedServerList serverList = new ConfigurationBasedServerList();
+   serverList.initWithNiwsConfig(config);
+   return serverList;
+}
+// 服务列表更新器
+@Bean
+@ConditionalOnMissingBean
+public ServerListUpdater ribbonServerListUpdater(IClientConfig config) {
+   return new PollingServerListUpdater(config);
+}
+// 负载均衡器
+@Bean
+@ConditionalOnMissingBean
+public ILoadBalancer ribbonLoadBalancer(IClientConfig config,
+      ServerList<Server> serverList, ServerListFilter<Server> serverListFilter,
+      IRule rule, IPing ping, ServerListUpdater serverListUpdater) {
+   if (this.propertiesFactory.isSet(ILoadBalancer.class, name)) {
+      return this.propertiesFactory.get(ILoadBalancer.class, config, name);
+   }
+   return new ZoneAwareLoadBalancer<>(config, rule, ping, serverList,
+         serverListFilter, serverListUpdater);
+}
+// 服务列表过滤器
+@Bean
+@ConditionalOnMissingBean
+@SuppressWarnings("unchecked")
+public ServerListFilter<Server> ribbonServerListFilter(IClientConfig config) {
+   if (this.propertiesFactory.isSet(ServerListFilter.class, name)) {
+      return this.propertiesFactory.get(ServerListFilter.class, config, name);
+   }
+   ZonePreferenceServerListFilter filter = new ZonePreferenceServerListFilter();
+   filter.initWithNiwsConfig(config);
+   return filter;
+}
+```
+
+## 2.2 ZoneAwareLoadBalancer分析
+
+​		ZoneAwareLoadBalancer继承了DynamicServerListLoadBalancer，利用Ribbon的部分组件实现动态更新服务列表的功能。
+
+### 2.2.1 ZoneAwareLoadBalancer主要方法和字段解析
+
+```java
+/**
+	ZoneAwareLoadBalancer里的服务选择实现。
+	如果com.netflix.loadbalancer.Server的实现类提供了zone字段，那么这个方法会将可用的服务列表按zone聚合，在随机选择一个zone，对该zone里的所有服务应用IRule算法选择一个服务
+	如果com.netflix.loadbalancer.Server的实现类没有提供zone字段，那么直接利用内部的IRule算法选择一个服务
+*/
+@Override
+public Server chooseServer(Object key) {
+    if (!ENABLED.get() || getLoadBalancerStats().getAvailableZones().size() <= 1) {
+        logger.debug("Zone aware logic disabled or there is only one zone");
+        return super.chooseServer(key);
+    }
+    Server server = null;
+    try {
+        LoadBalancerStats lbStats = getLoadBalancerStats();
+        Map<String, ZoneSnapshot> zoneSnapshot = ZoneAvoidanceRule.createSnapshot(lbStats);
+        logger.debug("Zone snapshots: {}", zoneSnapshot);
+        if (triggeringLoad == null) {
+            triggeringLoad = DynamicPropertyFactory.getInstance().getDoubleProperty(
+                    "ZoneAwareNIWSDiscoveryLoadBalancer." + this.getName() + ".triggeringLoadPerServerThreshold", 0.2d);
+        }
+
+        if (triggeringBlackoutPercentage == null) {
+            triggeringBlackoutPercentage = DynamicPropertyFactory.getInstance().getDoubleProperty(
+                    "ZoneAwareNIWSDiscoveryLoadBalancer." + this.getName() + ".avoidZoneWithBlackoutPercetage", 0.99999d);
+        }
+        Set<String> availableZones = ZoneAvoidanceRule.getAvailableZones(zoneSnapshot, triggeringLoad.get(), triggeringBlackoutPercentage.get());
+        logger.debug("Available zones: {}", availableZones);
+        if (availableZones != null &&  availableZones.size() < zoneSnapshot.keySet().size()) {
+            String zone = ZoneAvoidanceRule.randomChooseZone(zoneSnapshot, availableZones);
+            logger.debug("Zone chosen: {}", zone);
+            if (zone != null) {
+                BaseLoadBalancer zoneLoadBalancer = getLoadBalancer(zone);
+                server = zoneLoadBalancer.chooseServer(key);
+            }
+        }
+    } catch (Exception e) {
+        logger.error("Error choosing server using zone aware logic for load balancer={}", name, e);
+    }
+    if (server != null) {
+        return server;
+    } else {
+        logger.debug("Zone avoidance logic is not invoked.");
+        return super.chooseServer(key);
+    }
+}
+/** =========== 父类DynamicServerListLoadBalancer里的字段和方法 ================ */
+
+// 是否正在更新服务列表的标识
+protected AtomicBoolean serverListUpdateInProgress = new AtomicBoolean(false);
+// ServerList组件
+volatile ServerList<T> serverListImpl;
+// ServerListFilter组件
+volatile ServerListFilter<T> filter;
+// ServerListFilter组件
+protected volatile ServerListUpdater serverListUpdater;
+// 更新服务列表的任务
+protected final ServerListUpdater.UpdateAction updateAction = new ServerListUpdater.UpdateAction() {
+    @Override
+    public void doUpdate() {
+        updateListOfServers();
+    }
+};
+
+ // 构造函数
+public DynamicServerListLoadBalancer(IClientConfig clientConfig, IRule rule, IPing ping,
+                                     ServerList<T> serverList, ServerListFilter<T> filter,
+                                     ServerListUpdater serverListUpdater) {
+    super(clientConfig, rule, ping);
+    this.serverListImpl = serverList;
+    this.filter = filter;
+    this.serverListUpdater = serverListUpdater;
+    if (filter instanceof AbstractServerListFilter) {
+        ((AbstractServerListFilter) filter).setLoadBalancerStats(getLoadBalancerStats());
+    }
+    restOfInit(clientConfig);
+}
+
+void restOfInit(IClientConfig clientConfig) {
+    boolean primeConnection = this.isEnablePrimingConnections();
+    this.setEnablePrimingConnections(false);
+    // 启动定时任务，来动态更新服务列表
+    enableAndInitLearnNewServersFeature();
+	// 更新服务列表
+    updateListOfServers();
+    if (primeConnection && this.getPrimeConnections() != null) {
+        this.getPrimeConnections()
+            .primeConnections(getReachableServers());
+    }
+    this.setEnablePrimingConnections(primeConnection);
+    LOGGER.info("DynamicServerListLoadBalancer for client {} initialized: {}", clientConfig.getClientName(), this.toString());
+}
+public void updateListOfServers() {
+    List<T> servers = new ArrayList<T>();
+    // 利用ServerList和ServerListFilter两个组件，获取可用且过滤后的服务列表
+    if (serverListImpl != null) {
+        servers = serverListImpl.getUpdatedListOfServers();
+        LOGGER.debug("List of Servers for {} obtained from Discovery client: {}",
+                     getIdentifier(), servers);
+
+        if (filter != null) {
+            servers = filter.getFilteredListOfServers(servers);
+            LOGGER.debug("Filtered List of Servers for {} obtained from Discovery client: {}",
+                         getIdentifier(), servers);
+        }
+    }
+    // 更新所有服务
+    updateAllServerList(servers);
+}
+/**
+	主要就是将服务列表缓存到BaseLoadBalancer#allServerList字段里，
+	并强制触发心跳检测，利用IPing的实现将可用的服务列表缓存到BaseLoadBalancer#upServerList里
+*/
+protected void updateAllServerList(List<T> ls) {
+    // other threads might be doing this - in which case, we pass
+    if (serverListUpdateInProgress.compareAndSet(false, true)) {
+        try {
+            for (T s : ls) {
+                s.setAlive(true); // set so that clients can start using these
+                // servers right away instead
+                // of having to wait out the ping cycle.
+            }
+            setServersList(ls);
+            super.forceQuickPing();
+        } finally {
+            serverListUpdateInProgress.set(false);
+        }
+    }
+}
+
+/** ========== 父类BaseLoadBalancer里的主要字段和方法 ================== */
+
+// IRule组件，这里默认为RoundRobinRule，轮询算法
+protected IRule rule = DEFAULT_RULE;
+// 心跳检测策略，用于对所有服务进行ping。
+// 这里默认为SerialPingStrategy，内部串行化的依次对每个服务进行心跳进程
+protected IPingStrategy pingStrategy = DEFAULT_PING_STRATEGY;
+
+// Iping组件
+protected IPing ping = null;
+// 所有服务列表（子类DynamicServerListLoadBalancer里会有个定时任务进行更新）
+@Monitor(name = PREFIX + "AllServerList", type = DataSourceType.INFORMATIONAL)
+protected volatile List<Server> allServerList = Collections
+    .synchronizedList(new ArrayList<Server>());
+// 可用的服务列表（被Ping后仍然可用）
+// 子类DynamicServerListLoadBalancer里也会有个定时任务依次对allServerList进行ping，并将ping通过的服务放入该集合中
+@Monitor(name = PREFIX + "UpServerList", type = DataSourceType.INFORMATIONAL)
+protected volatile List<Server> upServerList = Collections
+    .synchronizedList(new ArrayList<Server>());
+// 利用java里Timer类实现的ping定时任务（线程名为NFLoadBalancer-PingTimer-服务名）
+protected Timer lbTimer = null;
+// 心跳检测时间间隔秒数（虽然这里为10，但构造器里初始化默认为30秒）
+protected int pingIntervalSeconds = 10;
+// 是否正在进行心跳检测的标识
+protected AtomicBoolean pingInProgress = new AtomicBoolean(false);
+// chooseServer的计数器，atomic类实现的
+private volatile Counter counter = Monitors.newCounter("LoadBalancer_ChooseServer");
+
+public BaseLoadBalancer(String name, IRule rule, LoadBalancerStats stats,
+                        IPing ping, IPingStrategy pingStrategy) { // 构造器
+
+    logger.debug("LoadBalancer [{}]:  initialized", name);
+
+    this.name = name;
+    this.ping = ping;
+    this.pingStrategy = pingStrategy;
+    setRule(rule); // 设置负载均衡算法
+    setupPingTask(); // 启动一个定时任务触发心跳检测
+    lbStats = stats;
+    init();
+}
+```
+
+### 2.2.2 ZoneAwareLoadBalancer总结
+
+ZoneAwareLoadBalancer构造方法重点步骤：
+
+- **BaseLoadBalancer#initWithConfig**方法
+  - 设置心跳检测时间间隔（默认30秒）
+  - 设置IRule到com.netflix.loadbalancer.BaseLoadBalancer#rule字段
+  - 设置IPing到com.netflix.loadbalancer.BaseLoadBalancer#ping字段。且如果IPing变化了，就取消上个IPing定时任务，重新利用Timer定时这个IPing任务（**线程名为NFLoadBalancer-PingTimer-服务名**）
+- com.netflix.loadbalancer.DynamicServerListLoadBalancer#restOfInit方法
+  - 用ScheduledThreadPoolExecutor定时一个服务列表更新任务（**线程名以PollingServerListUpdater-开头**），间隔时间默认为30秒
+  - 更新服务列表缓存
+
+​		ZoneAwareLoadBalancer的构造方法中主要是用于启动两个定时任务。一个定时任务是通过使用内部的ServerListUpdater组件更新服务列表并缓存到com.netflix.loadbalancer.BaseLoadBalancer#allServerList字段。而IPing组件则被Timer定时，用来对com.netflix.loadbalancer.BaseLoadBalancer#allServerList缓存里的服务进行心跳检测，并将检测合格的服务缓存到com.netflix.loadbalancer.BaseLoadBalancer#upServerList字段。这两个定时任务的时间间隔默认都是30秒
+
+## 3.1 配置服务的Ribbon组件
+
+### 3.1.1 @RibbonClient
+
+​		@**RibbonClient用来配置指定服务的Ribbon组件，value和name属性表示服务名，configuration表示提供Ribbon组件的配置类。**
+
+​		@RibbonClient和@RibbonClients注解都import了RibbonClientConfigurationRegistrar。RibbonClientConfigurationRegistrar用来注册Ribbon组件的配置类BeanDefinition，对这两个注解配置解析后生成RibbonClientSpecification的BeanDefinition注册到主容器中，而这些RibbonClientSpecification将被注入到org.springframework.cloud.netflix.ribbon.RibbonAutoConfiguration#configurations字段里，随后被应用到org.springframework.cloud.netflix.ribbon.SpringClientFactory#configurations字段中。
+
+​		在生成服务的ribbon配置容器时（每个服务都有自己的ApplicationContext）,会按**@RibbonClient配置的当前服务配置类**，**@RibbonClients配置的所有服务的默认配置类**和**spring提供的RibbonClientConfiguration**的顺序将配置类放入容器中，这些顺序就代表了优先级，用来配合@ConditionalOnMissingBean注解使用，保持当前容器中具体某个组件的单例性。
+
+​		**如果将这些ribbon组件放在主容器中（即应用程序的容器），那么这个将会覆盖掉上面三种配置类中的相同类型的那个组件**。因为在创建服务的ribbon配置容器时，主容器中的所有BeanDefinition已经准备好了，而@ConditionalOnMissingBean注解默认也会按类型搜索父容器中的BeanDefinition，这时会在父容器中搜索到指定类型的BeanDefinition，从而覆盖掉ribbon配置类中的那个组件。
+
+### 3.1.2 @RibbonClients
+
+​		**@RibbonClients的defaultConfiguration属性指定所有服务的默认ribbon配置类**。
+
+比如在配置中心为consul时，RibbonConsulAutoConfiguration自动配置类就是用了@RibbonClients注解，导入了ConsulRibbonClientConfiguration的ribbon配置类，在ConsulRibbonClientConfiguration里，提供了consul的相关ribbon组件
+
+ConsulRibbonClientConfiguration提供的ribbon组件，用于所有服务：
+
+- **ServerList：实现类为org.springframework.cloud.consul.discovery.ConsulServerList**。使用consul相关的api获取consul里可用的服务列表
+- **ServerListFilter：实现类为org.springframework.cloud.consul.discovery.HealthServiceServerListFilter**。既然服务都是consul提供的，那么服务的是否健康还是该由consul来判断
+- **IPing：实现类为org.springframework.cloud.consul.discovery.ConsulPing**。利用consul的api来进行心跳检测
+
+# 3 Feign的执行流程分析（配合Ribbon）
 
 
-
-# Feign + Ribbon 的调用
 
