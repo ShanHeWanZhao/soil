@@ -79,7 +79,7 @@ Acceptor是tomcat用来处理连接的线程，类比Netty里的ServerBootstrapA
 
 - 调用java.nio.channels.ServerSocketChannel#accept阻塞（在构建ServerSocketChannel时，并没有将其配置为非阻塞，这样当没有连接时，Acceptor线程就会阻塞在accept方法里）
 - 获取到SocketChannel，配置socket相关参数，并将这个SocketChannel封装为NioChannel
-- 用NioSocketWrapper在疯转一次NioChannel，设置感兴趣事件为READ。封装为PollerEvent，注册到Poller中
+- 用NioSocketWrapper在封装一次NioChannel，设置感兴趣事件为READ。封装为PollerEvent，注册到Poller中
 
 ### 3.5 Poller
 
@@ -93,7 +93,7 @@ Poller在内部会将PollerEvent中对应的SocketChannel和感兴趣的事件�
 
 ## 4 容器Container
 
-​		Container接口时tomcat容器的标准接口，ContainerBase为Container接口的实现抽象类，构造了容器需要的公共字段，tomcat的每个容器都通过继承ContainerBase来实现容器。每个容器都有属于自己的Pipeline管道，也存在自己的子容器集和（child Container）。当一个http请求到达后，解析完http数据，通过最顶级的容器Engine的管道，调用内部的Valve阀门，依次将请求传递到对应子容器的管道中的阀门里（Engine -> Host -> Context -> Wrapper），最后再通过过滤器到达Servlet
+​		Container接口是tomcat容器的标准接口，ContainerBase为Container接口的实现抽象类，构造了容器需要的公共字段，tomcat的每个容器都通过继承ContainerBase来实现容器。每个容器都有属于自己的Pipeline管道，也存在自己的子容器集和（child Container）。当一个http请求到达后，解析完http数据，通过最顶级的容器Engine的管道，调用内部的Valve阀门，依次将请求传递到对应子容器的管道中的阀门里（Engine -> Host -> Context -> Wrapper），最后再通过过滤器到达Servlet
 
 ContainerBase的一些重要字段和方法：
 
@@ -262,7 +262,7 @@ private Pattern deployIgnore = null;
 
 #### 4.2.1 HostConfig
 
-​		**查看默认的server.xml可知，Host标签下并没有配置Context标签。所以，解析出来后StandardHost并没有子容器。而StandardHost有配置的web启动目录（webapps），目录下有各种文件夹或war包等，HostConfig的作用就是将当前Host的web目录下的文件夹、war包等构造成各自Context，并将其添加到StandardHost作为其子容器。所以，这就是就算不在server.xml目录下配置Context标签，但webapps目录下的文文件夹或war包等还是会启动的原因。**
+​		**查看默认的server.xml可知，Host标签下并没有配置Context标签。所以，解析出来后StandardHost并没有子容器。而StandardHost有配置的web启动目录（webapps），目录下有各种文件夹或war包等，HostConfig的作用就是将当前Host的web目录下的文件夹、war包等构造成各自Context，并将其添加到StandardHost作为其子容器。所以，这就是就算不在server.xml目录下配置Context标签，但webapps目录下的文件夹或war包等还是会启动的原因。**
 
 ​		HostConfig实现了LifecycleListener接口，在tomcat解析server.xml中的构建StandardHost时，就会实例化一个HostConfig放到lifecycleListeners中，作为StandardHost启动阶段的监听器并完成一些列的工作。
 
@@ -295,7 +295,7 @@ protected void deployApps() {
 
 ### 4.2 Context
 
-Context时toncat中最重要的一个组件，一个Context就代表一个web环境，有最重要的path属性（默认为/，即代表根路径），对应一个ServletContext，默认实现为StandardContext。
+Context时tomcat中最重要的一个组件，一个Context就代表一个web环境，有最重要的path属性（默认为/，即代表根路径），对应一个ServletContext，默认实现为StandardContext。
 
 StandardContext重点字段：
 

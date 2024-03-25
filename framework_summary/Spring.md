@@ -651,3 +651,13 @@ public void multicastEvent(final ApplicationEvent event, @Nullable ResolvableTyp
 注册ApplicationListener也在容器的refresh中的registerListeners方法里（在注册事件广播器之后）
 
 ​	将容器中已有的ApplicationListener实例直接注册到org.springframework.context.event.AbstractApplicationEventMulticaster.ListenerRetriever#applicationListeners里，而将还未实例化的ApplicationListener之注册其beanName到org.springframework.context.event.AbstractApplicationEventMulticaster.ListenerRetriever#applicationListenerBeans中，让容器走正常流程去实例化这些bean。
+
+## 7 spring使用的设计模式举例
+
+- 单例模式：任何bean默认就是单例的
+- 工厂模式：FactoryBean
+- 装饰者模式：ApplicationContext和BeanFactory。ApplicationContext也实现了BeanFactory接口，内部使用BeanFactory的实现类去完成。
+  - 装饰者模式是为了不使用继承的方法而对类进行功能拓展（用来替代继承）。毕竟如果使用继承，会造成类结构过于复杂
+- 观察者模式：事件发布。发布一个ApplicationEvent事件，就可以触发ApplicationListener监听器对应的方法
+- 代理模式：AOP的实现，使用动态代理
+

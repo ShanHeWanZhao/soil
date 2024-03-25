@@ -990,6 +990,22 @@ public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command,
 
 ## 13.2 DelayedWorkQueue
 
+数组实现的小顶堆结构，非常适合定时任务的处理
+
+![顶堆结构](img/top_heap.png)
+
+​														**大顶堆和小顶堆结构**
+
+数组实现的小顶堆有如下规律：
+
+- 数组索引为0的元素是最小的
+- 父节点小于两个子节点（但这两个子节点大小顺序不定）
+- 数组结构紧凑（中间没有空元素）
+- 假设**父节点索引为x，则左子节点为2x + 1，右子节点为2x + 2**
+- 假设**子节点索引为y，则父节点索引为 (y - 1) / 2**
+
+
+
 ```java
 // 数组初始容量
 private static final int INITIAL_CAPACITY = 16;
@@ -1206,7 +1222,7 @@ protected boolean runAndReset() {
 
 ​		ScheduledThreadPoolExecutor本质还是个线程池，**内部的DelayedWorkQueue就是工作队列。投递的定时任务和普通任务都会封装为ScheduledFutureTask，并最终放入DelayedWorkQueue里的那个数组（只不过定时任务有延时，可能会放在队列中的任何位置。而普通任务封装的ScheduledFutureTask执行时间就是当前而已，始终会放到队列的队首并立马执行）**
 
-​		DelayedWorkQueue实现了BlockingQueue，是基于**数组的最小顶堆的数据结构**实现，以此**保证数组的第一个位置就是最近需要被执行的任务**。
+​		DelayedWorkQueue实现了BlockingQueue，是基于**数组的最小顶堆的数据结构**实现，以此**保证数组的第一个位置就是最近需要被执行的任务**。结构图和特点如下
 
 ​		ScheduledThreadPoolExecutor还使用了**Leader-Follower模式**，leader线程定时等待工作队列中第一个任务，其余线程一般就都无限期等待（如果向工作队列添加的是一个最快需要被执行的任务，可能就有多个定时等待的线程，但leader线程始终都会是最快需要被执行任务的线程）。
 
