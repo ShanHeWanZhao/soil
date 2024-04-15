@@ -6,6 +6,54 @@ SeataAutoConfiguration中的GlobalTransactionScanner，主要用来代理@Global
 
 ### 1.1 GlobalTransactionScanner的实例化
 
+#### 1.1.1 bean的自动代理
+
+​		**GlobalTransactionScanner继承了AbstractAutoProxyCreator抽象类，具有了自动代理bean的功能**。作为一个BeanPostProcessor，将在postProcessAfterInitialization方法调用时判断该bean是否应该被代理（对于AT模式，就是当前bean的class或method必须有@GlobalTransactional或@GlobalLock注解），最终被GlobalTransactionalInterceptor拦截。
+
+#### 1.1.2 初始化
+
+​		**GlobalTransactionScanner也实现了InitializingBean接口，在afterPropertiesSet方法中，将会对TM和RM进行初始化**
+
+##### 1.1.2.1 TM初始化
+
+- 实例化TmNettyRemotingClient对象（会创建好netty客户端的Bootstrap相关配置，等待后续init使用）
+
+- 开始**初始化TmNettyRemotingClient，先注册一些ResponseProcessor，用来处理server端回传的respons**e（因为时TM，所以只会注册和全局事务的begin，commit，rolback等相关response的Processor，具体类型如下）
+
+  - ```txt
+    MessageType.TYPE_SEATA_MERGE_RESULT
+    MessageType.TYPE_GLOBAL_BEGIN_RESULT
+    MessageType.TYPE_GLOBAL_COMMIT_RESULT
+    MessageType.TYPE_GLOBAL_REPORT_RESULT
+    MessageType.TYPE_GLOBAL_ROLLBACK_RESULT
+    MessageType.TYPE_GLOBAL_STATUS_RESULT
+    MessageType.TYPE_REG_CLT_RESULT
+    ```
+
+- 开启一些定时任务，包括与服务端Channel的reconnect任务、**MergedSend任务（处理批量消息发送）**、future的超时检测任务。
+
+- 启动和TM相关的netty客户端的Bootstrap，添加对应的ChannelHandler，包括IdleStateHandler（心跳检测，会进行ping-pong操作）、解码和编码器、**ClientHandler（双向handler，开始真正处理数据，同时也处理IdleStateHandler发来的IdleStateEvent事件，判断后是否进行ping-pong，以此维护长连接）**
+
+##### 1.1.2.2 RM初始化
+
+- 实例化RmNettyRemotingClient对象，和上面类似，也会创建好netty客户端的Bootstrap相关配置
+
+- 开始**初始化RmNettyRemotingClient，也会先注册一些ResponseProcessor，用来处理server端回传的response**（因为时RM，所以只会注册资源（可以理解成数据库）相关的操作，具体类型如下）
+
+  - ```java
+    MessageType.TYPE_BRANCH_COMMIT
+    MessageType.TYPE_BRANCH_ROLLBACK
+    MessageType.TYPE_RM_DELETE_UNDOLOG
+    
+    MessageType.TYPE_SEATA_MERGE_RESUL
+    MessageType.TYPE_BRANCH_REGISTER_RESULT
+    MessageType.TYPE_BRANCH_STATUS_REPORT_RESULT
+    MessageType.TYPE_GLOBAL_LOCK_QUERY_RESULT
+    MessageType.TYPE_REG_RM_RESULT
+    ```
+
+- 和上面一样，开启RM相关的netty bootstrap并注册相同的ChannelHandler
+
 ### 1.2 相关表
 
 - **undo_log**：客户端的表，保存修改数据sql操作前后镜像值，主要用于全局事务回滚来构造回滚sql以回滚数据
@@ -15,23 +63,39 @@ SeataAutoConfiguration中的GlobalTransactionScanner，主要用来代理@Global
 
 ## 2 重要术语
 
-### 2.1 RM
+### 2.1 RM（Resource Manager）
 
-​		Resource Manager，资源管理器，管理分支事务处理的资源，与TC交谈以注册分支事务和报告分支事务的状态，并驱动分支事务提交或回滚。
+​		资源管理器，管理分支事务处理的资源，与TC交谈以注册分支事务和报告分支事务的状态，并驱动分支事务提交或回滚。
 
-​		作用在seata客户端，代码实现中和DatsSource的代理绑定，负责和数据库相关的操作打交道，默认实现为DefaultResourceManager。在Connection的commit中，负责向server端注册当前分支事务；在Connection的rollback中，负责向server端报告当前分支事务的错误状态。同时也处理服务端发送过来的分支事务提交（删除undo_log）或回滚（生成补偿sql并执行）操作。
+​		**作用在seata客户端，代码实现中和DatsSource的代理绑定，负责和数据库相关的操作打交道，默认实现为DefaultResourceManager（仅是一个适配器，针对不同的模式适配了不同的ResourceManager实现。比如AT模式的默认实现是DataSourceManager）**。在Connection的commit中，负责向server端注册当前分支事务；在Connection的rollback中，负责向server端报告当前分支事务的错误状态。同时也处理服务端发送过来的分支事务commit（删除undo_log）或rollback（生成补偿sql并执行）操作。
 
-### 2.2 TM
+### 2.2 TM（Transaction Manager）
 
-​		Transaction Manager ，事务管理器，开始全局事务、提交或回滚全局事务。
+​		 事务管理器，开始全局事务、提交或回滚全局事务。
 
-​		作用在seata客户端，代码实现中和@GlobalTransactional的拦截打交道，负责开启、提交或回滚全局事务，默认实现为DefaultTransactionManager。
+​		**作用在seata客户端，代码实现中和@GlobalTransactional的拦截打交道，，默认实现为DefaultTransactionManager。负责开启、commit或rollback全局事务（commit和rollback操作只是向server发起这个请求了，具体的还需要TC和RM来执行真正的数据处理）**。三个核心方法如下
 
-### 2.3 TC
+- **begin**：向server发送开启全局事务的请求。**server端会创建一条global_session数据来表示这个全局事务**，并回传给TM对应的xid
+- **commit**：向server端发起全局事务的commit。server端具体做法如下（**从第二个操作开始，就会异步处理了，因为这之后的操作基本就是删除些用来支持全局事务的数据，不会再对分支事务修改的数据有影响了**）。**所以，commit操作是很快的，TM只需等待TC删除掉锁信息即可**
+  - 修改global_session状态，**释放锁资源（即删除lock_table对应的记录）**
+  - 拿到这个global_session关联的branch_session，依次**触发branch_session的commit（即发送请求到RM，RM会删除掉branch_session对应的undo_log数据）**
+  - **server端删除对应的branch_session记录**
+  - 全部branch_session操作完成后，TC开始修改global_session状态为完毕然后**删除这个global_session**
+  - 返回对应的GlobalStatus状态给TM。至此，全局事务commit完毕
+- **rollback**：向server端发起全局事务的rollback。server端具体做法如下
+  - 设置对应的global_session状态为关闭，避免新分支的注册
+  - 拿到这个global_session关联的branch_session，依次**触发branch_session的rollback（即发送请求到RM，RM会拿出这个branch_session对应的undo_log数据，并进行undo操作，复原数据）**
+  - **server端删除对应的branch_session记录**
+  - **全部branch_session操作rollback成功后，TC再释放锁资源（即删除lock_table对应的记录），并删除对应的global_session数据**
+  - 返回对应的GlobalStatus状态给TM。至此，全局事务rollback完毕
 
-​	Transaction Coordinator，事务协调者，维护全局和分支事务的状态，驱动全局事务提交或回滚。
+### 2.3 TC（Transaction Coordinator）
 
-​	作用在seata服务端，在服务端实分支事务的注册，全局事务的开启、回滚等操作
+​	事务协调者，作用在seata服务端，维护全局和分支事务的状态，驱动全局事务提交或回滚，**默认实现为DefaultCoordinator**。
+
+​	与RM打交道，实现分支事务的注册等，并在TM发起全局事务的commit和rollback后再驱动分支事务的commit和rollback。
+
+​	和TM打交道，实现全局事务的开启、commit和rollback等操作
 
 ### 2.4 全局事务的发起者
 
@@ -39,15 +103,60 @@ SeataAutoConfiguration中的GlobalTransactionScanner，主要用来代理@Global
 
 ### 2.5 全局事务的参与者
 
-​		**处于微服务调用链中全局事务内部，参与到了其他上游服务发起的全局事务（这是线程上下文存在xid）。类比spring提供的事务传播策略中的加入了已存在的事务，所以，全局事务的参与者不能触发全局事务的回滚或提交。只能由RM来报告当前分支事务的状态（触发rollback后，分支事务状态变为PhaseOne_Failed）**
+​		**处于微服务调用链中全局事务内部，参与到了其他上游服务发起的全局事务（这时线程上下文存在xid）。类比spring提供的事务传播策略中的加入了已存在的事务，所以，全局事务的参与者不能触发全局事务的回滚或提交。只能由RM来报告当前分支事务的状态（触发rollback后，分支事务状态变为PhaseOne_Failed）**
+
+### 2.6 分支事务和全局事务
+
+全局事务：整个分布式事务，由多个分支事务组成
+
+分支事务：分布式事务中整个链路里每个服务单独的事务，不可能跨服务存在。运行在spring事务的支持下，一个本地事务就是一个分支事务。没有被本地事务支持但运行在全局事务下，则一个dml sql就会生成一个分支事务
 
 ## 三、服务端初始化
 
+服务端就是一个springboot项目，启动类是**ServerApplication，核心启动方法是io.seata.server.Server#start**
 
+```java
+// io.seata.server.Server#start 方法里的一些主要功能（删除了些不重要的）
+public static void start(String[] args) {
+
+    // 统计相关功能初始化
+    MetricsManager.get().init();
+    // 设置数据保存模式（db，file，或redis）
+    System.setProperty(ConfigurationKeys.STORE_MODE, parameterParser.getStoreMode());
+
+    ThreadPoolExecutor workingThreads = new ThreadPoolExecutor(NettyServerConfig.getMinServerPoolSize(),
+            NettyServerConfig.getMaxServerPoolSize(), NettyServerConfig.getKeepAliveTime(), TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(NettyServerConfig.getMaxTaskQueueSize()),
+            new NamedThreadFactory("ServerHandlerThread", NettyServerConfig.getMaxServerPoolSize()), new ThreadPoolExecutor.CallerRunsPolicy());
+
+    // 创建netty相关对象
+    NettyRemotingServer nettyRemotingServer = new NettyRemotingServer(workingThreads);
+    nettyRemotingServer.setListenPort(parameterParser.getPort());
+    // 创建TC
+    DefaultCoordinator coordinator = new DefaultCoordinator(nettyRemotingServer);
+    // 启动一些定时任务，包括 异步全局事务commit操作等
+    coordinator.init();
+    nettyRemotingServer.setHandler(coordinator);
+    //127.0.0.1 and 0.0.0.0 are not valid here.
+    // 设置服务端netty的ip和端口
+    if (NetUtil.isValidIp(parameterParser.getHost(), false)) {
+        XID.setIpAddress(parameterParser.getHost());
+    } else {
+        XID.setIpAddress(NetUtil.getLocalIp());
+    }
+    XID.setPort(nettyRemotingServer.getListenPort());
+
+    // 注册消息处理器并构建netty的ServerBootstrap，开启端口的监听
+    nettyRemotingServer.init();
+}
+```
 
 ## 四、客户端初始化
 
+​		客户端初始化主要是通过两个自动代理bean来实现的
 
+- **GlobalTransactionScanner**：代理**@GlobalTransactional和@GlobalLock注解标志的类或方法，统一使用GlobalTransactionalInterceptor进行拦截**
+- **SeataAutoDataSourceProxyCreator**：代理DataSource类。**原来执行sql的流程 DataSource -> Connection -> Statement -> 开始执行sql，变为了DataSourceProxy -> ConnectionProxy -> StatementProxy**（**DataSourceProxy里代理commit相关操作，和server通信。StatementProxy则代理执行sql的逻辑，处理执行前后镜像数据并生成undo数据，以便后续的rollback操作**）
 
 ## 五、一个完整的全局事务流程（db模式）
 
@@ -98,7 +207,7 @@ SeataAutoConfiguration中的GlobalTransactionScanner，主要用来代理@Global
 
 #### 3、Statement的执行
 
-1. select语句因为不会涉及到数据修改，所以直接走原Statement直接执行。
+1. 普通的select语句因为不会涉及到数据修改，就不会申请锁资源。所以直接走原Statement直接执行。
 
 2. 而其他会修改数据的sql（比如 insert，update，delete，select_for_update等），走代理。具体逻辑：在执行原SQL之前，通过原sql构造出select语句，来查询更新字段的执行前镜像值，封装成TableRecords。之后再执行原SQL，执行后再查询更新字段的执行后镜像值，封装成TableRecords，最后再将两次的TableRecords封装成SQLUndoLog，暂放内存中，等待分支事务commit再写入库
 
@@ -174,17 +283,16 @@ SeataAutoConfiguration中的GlobalTransactionScanner，主要用来代理@Global
 - 利用客户端传来的信息构造BranchSession
 
 - **对BranchSession尝试加锁（AT模式才会）**
-
-  - **通过对锁信息的一系列检查和转化，到达LockStoreDataBaseDAO#acquireLock(java.util.List<io.seata.core.store.LockDO>)接口**
-
-  - 查询lock_table中对应row_key存在的数据（这个row_key就是行锁，能唯一标识客户端某个数据库里某个表的某行数据）
-
-    - 如果没查询出来，代表写锁不冲突，将这些锁资源保存在lock_table中，直接返回加锁成功
-
-    - 如果查询出来了，且这些数据还是当前全局事务（xid一致），代表重复枷锁而已，只需要将原本不存在的所数据保存到lock_table中，就可返回枷锁成功
-
-    - 查询出来，且有其他全局事务占用当前资源，直接返回加锁失败。由io.seata.server.transaction.at.ATCore#branchSessionLock直接抛出异常码为LockKeyConflict的异常，代表写锁冲突
-
+- **通过对锁信息的一系列检查和转化，到达LockStoreDataBaseDAO#acquireLock(java.util.List<io.seata.core.store.LockDO>)接口**
+  
+- 查询lock_table中对应row_key存在的数据（这个row_key就是行锁，能唯一标识客户端某个数据库里某个表的某行数据）
+  
+  - 如果没查询出来，代表写锁不冲突，将这些锁资源保存在lock_table中，直接返回加锁成功
+  
+  - 如果查询出来了，且这些数据还是当前全局事务（xid一致），代表重复枷锁而已，只需要将原本不存在的所数据保存到lock_table中，就可返回枷锁成功
+  
+  - 查询出来，且有其他全局事务占用当前资源，直接返回加锁失败。由io.seata.server.transaction.at.ATCore#branchSessionLock直接抛出异常码为LockKeyConflict的异常，代表写锁冲突
+  
 - 加锁成功就不说了，直接向下走。**而加锁失败，由服务端的AbstractCallback捕获异常，并转化为对应消息，发送给客户端**
 
 - **客户端的ConnectionProxy#recognizeLockKeyConflictException方法检测到是锁冲突异常，又抛出LockConflictException异常**
@@ -193,7 +301,7 @@ SeataAutoConfiguration中的GlobalTransactionScanner，主要用来代理@Global
 
 - **如果30次还是重试失败，转为LockWaitTimeoutException异常，触发客户端本地事务的回滚**
 
-## 7 问题
+## 7 思考
 
 ### 7.1 必须保证全局事务范围大于等于分支事务（spring提供的事务注解等）
 
@@ -210,7 +318,7 @@ SeataAutoConfiguration中的GlobalTransactionScanner，主要用来代理@Global
 
 ### 7.2 全局事务的参与者回滚异常一定让全局事务的发起者感知到
 
-​		由于全局事务的参与者本地tollback时，只会通过RM向服务端报告当前分支是的状态为PhaseOne_Failed。如果参与者本地回滚后，全局事务的发起者不能感知到参与者的回滚，就commit了全局事务。在服务端的io.seata.server.coordinator.DefaultCore#doGlobalCommit方法中（全局事务发起者向server端发送全局事务提交），获取到全局事务的所有分支事务时，如果某个分支事务状态为PhaseOne_Failed，也仅仅是删除这个分支事务，不会触发全局回滚，全局事务从整体上来说还是提交，就造成了参发起者commit，参与者rollback，分布式事务就失败了。
+​		由于全局事务的参与者本地rollback时，只会通过RM向服务端报告当前分支是的状态为PhaseOne_Failed。如果参与者本地回滚后，全局事务的发起者不能感知到参与者的回滚，而触发了全局事务发起者的commit，这时在服务端的io.seata.server.coordinator.DefaultCore#doGlobalCommit方法中（全局事务发起者向server端发送全局事务提交），TC获取到全局事务的所有分支事务时，如果某个分支事务状态为PhaseOne_Failed（即这个分支事务本地rollback了），TC也仅仅是删除这个分支事务，不会触发全局回滚，全局事务从整体上来说还是提交，就造成了参发起者commit，这个参与者rollback，分布式事务逻辑上就失败了。
 
 ​		所以，参与者的回滚一定要让发起者感知到，并让发起者触发全局事务的回滚，这样，全局事务才是原子性的操作。
 
@@ -233,6 +341,95 @@ GlobalTransactionalInterceptor#startDegradeCheck逻辑：
 #### 7.3.3 全局事务commit和rollback失败重试机制
 
 ​	全局事务提交和回滚的重试机制在io.seata.tm.api.DefaultGlobalTransaction里的commot和rollback里实现。受client.tm.commitRetryCount配置参数控制，默认重试5次。
+
+### 7.4 seata的分布式事务隔离级别
+
+​		传统数据库如oracle默认读已提交，mysql则通过mvcc和undo log实现了可重复读隔离级别，而**seata实现的分布式事务也可工作在读已提交的隔离级别下**
+
+如何实现的：
+
+> ​		seata的分支事务进行本地commit操作时，会将改动的的数据构造成lockKeys，在分支事务注册到server时带上这些lockKeys，server端会对这些lockKey进行解析构建，并对其进行上锁，上锁成功的标志是成功将全部lockKeys保存到server短的lock_table表（可上锁的前提是lock_table表没有对应的lockKey数据）。在之后的分支事务的数据修改都会先对这些数据在server端上锁判断，以此实现类似数据库的互斥锁。
+>
+> ​		但是，当分支事务A本地commit后，但此时全局事务还未commit。如果有另一个事务B读取到了事务A修改的数据结果，就会产生脏读（因为这时全局事务还未commit，甚至可能触发rollback操作），解决脏读的办法就是事务B读取使用select for update语句，并且被@GlobalTransactional和@GlobalLock注解拦截。拦截后seata内部会对select for update的操作进行锁判断，生成一个SelectForUpdateExecutor执行器（核心执行方法doExecute代码如下）。所以直到分支事务A对应的全局事务结束释放了锁资源后，事务B才会读到数据并返回，以此实现读已提交
+
+注意**，@GlobalTransactional + select for update**和**@GlobalLock + select for update都可实现select操作的读已提交隔离级别**，**但GlobalLock 更轻量级，它不会注册分支事务和加锁等操作，只会进行锁检查。所以，如果上述事务B不需要运行在全局事务或本地事务的模式先下而又想实现全局事务的读已提交隔离级别，就可使用@GlobalLock + select for update组合**
+
+```java
+// SelectForUpdateExecutor核心执行方法
+public T doExecute(Object... args) throws Throwable {
+    Connection conn = statementProxy.getConnection();
+    DatabaseMetaData dbmd = conn.getMetaData();
+    T rs;
+    Savepoint sp = null;
+    boolean originalAutoCommit = conn.getAutoCommit();
+    try {
+        // 在这里单独开启事务。如果没有原事务则直接开启，如果有则新建一个savepoint来开启事务
+        if (originalAutoCommit) { // 没有原事务
+            conn.setAutoCommit(false);
+        } else if (dbmd.supportsSavepoints()) { // 有原事务，新建一个savepoint来开启内嵌事务
+            sp = conn.setSavepoint();
+        } else {
+            throw new SQLException("not support savepoint. please check your db version");
+        }
+
+        LockRetryController lockRetryController = new LockRetryController();
+        ArrayList<List<Object>> paramAppenderList = new ArrayList<>();
+        String selectPKSQL = buildSelectSQL(paramAppenderList);
+        while (true) {
+            try {
+                // #870
+                // execute return
+                // executeQuery return ResultSet
+                // 执行sql语句，会获取本地锁
+                rs = statementCallback.execute(statementProxy.getTargetStatement(), args);
+
+                // Try to get global lock of those rows selected
+                TableRecords selectPKRows = buildTableRecords(getTableMeta(), selectPKSQL, paramAppenderList);
+                // 构建lock key
+                String lockKeys = buildLockKey(selectPKRows);
+                if (StringUtils.isNullOrEmpty(lockKeys)) { // lock key不存在，代表没有锁冲突，直接就break了
+                    break;
+                }
+
+                if (RootContext.inGlobalTransaction() || RootContext.requireGlobalLock()) { 
+                    // 全局锁的获取和判断必须在@GlobalTransactional or @GlobalLock注解下
+                    // 只进行锁检查，不加锁（检查失败内部会抛异常）
+                    statementProxy.getConnectionProxy().checkLock(lockKeys);
+                } else {
+                    throw new RuntimeException("Unknown situation!");
+                }
+                // 走到这就代表全局锁没有冲突（要查询的数据没有被多个事务同时处理），可直接返回了
+                break;
+            } catch (LockConflictException lce) {
+                // 全局锁冲突，本地事务先rollback，释放select .. for update获取到的锁
+                if (sp != null) {
+                    conn.rollback(sp);
+                } else {
+                    conn.rollback();
+                }
+                // sleep后会再进行重试
+                // trigger retry
+                lockRetryController.sleep(lce);
+            }
+        }
+    } finally {
+        // 复原现场
+        if (sp != null) {
+            try {
+                if (!JdbcConstants.ORACLE.equalsIgnoreCase(getDbType())) {
+                    conn.releaseSavepoint(sp);
+                }
+            } catch (SQLException e) {
+                LOGGER.error("{} release save point error.", getDbType(), e);
+            }
+        }
+        if (originalAutoCommit) {
+            conn.setAutoCommit(true);
+        }
+    }
+    return rs;
+}
+```
 
 
 

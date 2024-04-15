@@ -20,11 +20,14 @@
 
 ​		定义了Channel被事件触发后的顶层处理接口，不论是客户端Channel还是服务端Channel，都会有对应的ChannelPipeline，所以这个顶层接口只定义了最简单的当前Channel添加和移除ChannelPipeline和发生异常的方法，**且因为这里面的方法都是和当前handler相关的，所以当某个方法触发时，是不会向后传播的**
 
+- **入站事件（Inbound）：当客户端或服务端接收对方发来的数据触发的事件（即read操做，即从网卡在读到数据后触发的一系列操作）**
+- **出战事件（Outbound）：当客户端和服务端开始发送数据时触发的事件（即write操作，终点就是从网卡把这个数据发送出去）**
+
 ### 2.1 ChannelInboundHandler
 
-​		定义了入站事件的接口，其中大部分接口只会触发一起，比如注册和激活等接口，而read和userEventTriggered等接口能触发多次。
+​		定义了入站事件的接口，其中大部分接口只会触发一次，比如注册和激活等接口，而read和userEventTriggered等接口能触发多次。
 
-​		channelRead作为业务的主要实现接口，和channelReadComplete都是当从Channel中读取数据时的顶层抽象接口（**对于客户端Channel来说，分别是读取一次和读取完毕时触发。对于服务端的Channel来说，就是接收连接后，产生的客户端Channel并将其注册到EventLoop**），所以，这两个接口是能多次触发的。而又**因为netty在读取从客户端Channel传来的数据时，并不能确定数据的大小，所以netty会创建一个估值大小的ByteBuf进行重复读取，所以，一次客户端Channel发送的数据可能触发多次channelRead接口，当这次读取完毕后，再触发一次channelReadComplete接口**
+​		channelRead作为业务的主要实现接口，和channelReadComplete都是当从Channel中读取数据时的顶层抽象接口（**对于SocketChannel来说，分别是读取一次和读取完毕时触发。对于ServerSocketChannel来说，就是接收连接后，产生的客户端Channel并将其注册到EventLoop**），所以，这两个接口是能多次触发的。而又**因为netty在读取从客户端Channel传来的数据时，并不能确定数据的大小，所以netty会创建一个估值大小的ByteBuf进行重复读取，所以，一次客户端Channel发送的数据可能触发多次channelRead接口，当这次读取完毕后，再触发一次channelReadComplete接口**
 
 - 客户端Channel的channelRead和channelReadComplete触发地点：NioByteUnsafe#read
 - 服务端Channel的channelRead和channelReadComplete触发地点：NioMessageUnsafe#read
@@ -73,16 +76,6 @@ void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception;
 void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception;
 ```
 
-### 2.2 ByteToMessageDecoder
-
-​		作为解码器的顶级抽象类，肯定实现了ChannelInboundHandler接口，且重写了channelRead方法用来准备解码操作。
-
-​		**不论是tcp的拆包，还是netty内部在将Channel中的数据封装到ByteBuf中时，都可能导致channelRead方法的第一次ByteBuf参数不是一次完整的数据。所以，这时解码器的另一个作用就出现了，将不足一次完整的数据缓存起来，等待下次channelRead时将新的ByteBuf数据和上次的组合，依次反复操作，直到构成一次完整的数据。所以，解码器是一定不能在Channel中共享的**
-
-​		**io.netty.handler.codec.ByteToMessageDecoder#decode是子类需要唯一实现的接口。子类自己判断当前ByteBuf是否够一次的数据，如果够了，则进行解码，并将结果保存在out中。如果不够，则不进行解码操作，等待下次的channelRead在重复如此操作**
-
-​		**所以，解码器应该放在handler队列的首位来进行解码操作，只有解码成功的才会继续向后传播channelRead事件（此时参数可以不是ByteBuf了，可以是我们解码出的任意对象）**
-
 ### 2.3 ChannelOutboundHandler
 
 定义了出站事件，流经方向是从客户端到服务端。出站事件接口没有入站事件接口用的多。
@@ -102,7 +95,7 @@ void close(ChannelHandlerContext ctx, ChannelPromise promise) throws Exception;
 
 void deregister(ChannelHandlerContext ctx, ChannelPromise promise) throws Exception;
 // 当 当前Channel设置为autoRead时触发，用来监听当前Channel感兴趣的事件
-// ServerSocketChannel时ACCEPT事件，SocketChannel是READ事件
+// ServerSocketChannel是ACCEPT事件，SocketChannel是READ事件
 void read(ChannelHandlerContext ctx) throws Exception;
 // 向channel发送数据时触发（会触发多次，只会用在SocketChannel）
 void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception;
@@ -110,9 +103,41 @@ void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws
 void flush(ChannelHandlerContext ctx) throws Exception;
 ```
 
+### 2.3 ByteToMessageDecoder
+
+​		作为解码器的顶级抽象类，**主要作用是用来解决网络拆包中导致的一次或多次读取到的数据不完整（内置了一个merge cumulator类来组合多次碎片化的ByteBuf数据），但具体的数据是否完整应该交给子类去实现并判断（即子类实现decode接口）**。实现了ChannelInboundHandler接口，且重写了channelRead方法用来准备解码操作。
+
+​		**不论是tcp的拆包，还是netty内部在将Channel中的数据封装到ByteBuf中时，都可能导致channelRead方法的第一次ByteBuf参数不是一次完整的数据。所以，这时解码器的另一个作用就出现了，将不足一次完整的数据缓存起来，等待下次channelRead时将新的ByteBuf数据和上次的组合，依次反复操作，直到构成一次完整的数据。所以，解码器是一定不能在Channel中共享的**
+
+​		**io.netty.handler.codec.ByteToMessageDecoder#decode是子类需要唯一实现的接口。子类自己判断当前ByteBuf是否够一次的数据，如果够了，则进行解码，并将结果保存在out中。如果不够，则不进行解码操作，等待下次的channelRead在重复如此操作**
+
+​		**所以可以推断，解码器应该放在handler队列的首位来进行解码操作，只有解码成功的才会继续向后传播channelRead事件（此时参数可以不是ByteBuf了，可以是我们解码出的任意对象）**
+
+#### 2.3.1 FixedLengthFrameDecoder
+
+​		固定长度解码器，内部的字段frameLength表示了读取一次的固定字节数。
+
+#### 2.3.2 LineBasedFrameDecoder
+
+​		行分隔符解码器，找到行标志（\n或\r\n）。一次读取指挥读取一整行的数据
+
+#### 2.3.3 DelimiterBasedFrameDecoder
+
+​		自定义分隔符解码器，允许传入一个自定义字符的ByteBuf作为分隔符来读取数据
+
+#### 2.3.4 LengthFieldBasedFrameDecoder
+
+​		比上面三个都更加灵活的解码器，**基于某个字段长度的解码器**。重要参数如下
+
+- maxFrameLength：最大帧长度。也就是可以接收的数据的最大长度。如果超过，此次数据会被丢弃。
+- lengthFieldOffset：长度域偏移。就是说数据开始的几个字节可能不是表示数据长度，需要后移几个字节才是长度域。
+- lengthFieldLength：长度域字节数。用几个字节来表示数据长度。
+- lengthAdjustment：数据长度修正。因为长度域指定的长度可以是header + body的整个长度，也可以只是body的长度。如果表示header+body的整个长度，那么我们需要修正数据长度。
+- initialBytesToStrip：跳过的字节数。如果你需要接收header+body的所有数据，此值就是0，如果你只想接收body数据，那么需要跳过header所占用的字节数。
+
 ## 3 ChannelPipeline
 
-​		配合Channel抽象出来的管道，一个Channel对应一个ChannelPipeline（一对一）。ChannelPipeline是用来串联并触发ChannelHandler的数据结构，可以看做是ChannelHandler的一种链表结构，内部存储了固定的head（HeadContext）和tail（TailContext）（这两种都是ChannelHandler）。
+​		配合Channel抽象出来的管道，一个Channel对应一个ChannelPipeline（一对一）。ChannelPipeline是用来串联并触发ChannelHandler的数据结构（**责任链模式**），可以看做是ChannelHandler的一种链表结构，内部存储了固定的head（HeadContext）和tail（TailContext）（这两种都是ChannelHandler）。
 
 ​		ChannelPipeline实现了ChannelInboundInvoker和ChannelOutboundInvoker，任何一个入站或出站事件的触发都是由调用ChannelPipeline的fire相关接口开始的，会根据是入站事件还是出站事件交由内部的head或tail调用
 
@@ -120,7 +145,7 @@ void flush(ChannelHandlerContext ctx) throws Exception;
 
 ### 3.1 HeadContext
 
-​		同时实现了ChannelInboundHandler，是处理入站事件的源头，所有入站事件的触发都将从HeadContext发起，将事件依次向后传播，然后走过我们配置的所有ChannelInboundHandler，直到tail结束
+​		同时实现了ChannelInboundHandler和ChannelOutboundHandler，是**处理入站事件的源头**，所有入站事件的触发都将从HeadContext发起，将事件依次向后传播，然后走过我们配置的所有ChannelInboundHandler，直到tail结束
 
 ​		同时**HeadContext也实现了ChannelOutboundHandler，也是出站事件的末尾。内部有个Unsafe对象，Unsafe对象封装了真正的IO操作，比如绑定本地端口，连接服务器，关闭操作等。所以，出站事件（比如bind到本地端口，connect到远程端口等）从tail出发，一直传到head，再由head的Unsafe对象进行真正的绑定和连接IO操作**
 
@@ -128,9 +153,9 @@ void flush(ChannelHandlerContext ctx) throws Exception;
 
 ​		实现了ChannelInboundHandler接口，作为入站事件的末尾来处理对应的入站事件（**基本都是不做什么，或者打个日志而已**）。例如，入站事件的异常（exceptionCaught接口）如果不做任何处理，继续向后传播的话，最终也只会记录日志，并不会抛出异常
 
-​		且间接实现了ChannelOutboundInvoker，所以具有调用出站事件接口的能力。
+​		**因为没有实现ChannelOutboundHandler接口，所以不具备处理出站事件的能力。虽然从它开始触发出站事件，但它却处理不了出站事件（只能不断的交给前面的HandlerContext，直到实现了ChannelOutboundHandler的handler才开始真正处理出站事件）**
 
-​		**当通过ChannelPipeline调用出站事件时，会交给tail开始触发出站事件。tail向前不断传播出站事件，事件从后向前流经我们提供的各个ChannelOutboundHandler，最后走到head，再由head进行正正的IO操作（绑定本地端口、连接远程端口等等出站事件）**
+​		**当通过ChannelPipeline调用出站事件时，会交给tail开始触发出站事件。tail向前不断传播出站事件，事件从后向前流经我们提供的各个ChannelOutboundHandler，并过滤出Outbound类型的handler来处理出站事件，最后走到head，再由head进行正正的IO操作（绑定本地端口、连接远程端口等等出站事件）**
 
 ### 3.3  ChannelHandlerContext
 
@@ -172,7 +197,7 @@ private volatile int handlerState = INIT;
 
 ### 3.4 总结
 
-​		**ChannelPipeline可以看成是一种过滤器的实现，默认实现是DefaultChannelPipeline，跟随着对应的Channel实例化时而创建**。**每个ChannelHandlerContext都有能力终结当前事件的传播，如果想把当前事件记录传播给后面（入站事件）or前面（出站事件）的处理器时，就调用fire开头的对应方法**
+​		**ChannelPipeline是一种责任链模式的实现，默认实现是DefaultChannelPipeline，跟随着对应的Channel实例化时而创建**。**每个ChannelHandlerContext都有能力终结当前事件的传播，如果想把当前事件记录传播给后面（入站事件）or前面（出站事件）的处理器时，就调用fire开头的对应方法**
 
 - **入站事件：head -> 我们按正向顺序配置的ChannelInboundHandler -> tail（数据的最终处理方式，打日志或release）**
 - **出站事件：tail -> 我们按反向顺序配置的ChannelOutboundHandler -> head（真正的IO操作）**
@@ -193,7 +218,7 @@ private volatile int handlerState = INIT;
 
 ​		EventLoopGroup实现了ScheduledExecutorService接口，并提供了将Channel注册到EventLoop的接口。
 
-​		**EventLoopGroup可以类比为线程池。作为管理EventLoop的组件，在NioEventLoopGroup中，利用构造函数实例化了[n个处理器 * 2]个EventLoop，EventLoopGroup的线程池接口和注册Channel接口等的实现都是依赖EventLoop去处理的，EventLoopGroup实际上只提供选择哪个EventLoop去执行注册或任务而已（默认是轮询）**
+​		**EventLoopGroup可以类比为线程池。作为管理EventLoop的组件，在NioEventLoopGroup中，利用构造函数实例化了[可通过系统参数io.netty.eventLoopThreads配置，否则为n个处理器 * 2]个EventLoop，EventLoopGroup的线程池接口和注册Channel接口等的实现都是依赖EventLoop去处理的，EventLoopGroup实际上只提供选择哪个EventLoop去执行注册或任务而已（默认是轮询）**
 
 ### 5. 1 EventLoop
 
@@ -362,7 +387,14 @@ ServerBootstrap启动客户端的工具，用于将我们设置的各种ChannelH
   - 当传播完所有的channelActive事件后，如果开启了**autoRead（默认开启），又开始通过pipeline触发出站事件read**
   - **当出站事件read走到head时，调用Unsafe，利用Selector监听READ事件**
 
-## 8 Netty架构
+## 8 Netty中的零拷贝场景
+
+- **使用直接内存，在进行IO数据传输时避免了ByteBuf从堆外内存拷贝到堆内内存的步骤**（而如果使用堆内内存分配ByteBuf的话，那么发送数据时需要将IO数据从堆内内存拷贝到堆外内存才能通过Socket发送）
+- Netty 使用 FileRegion 实现文件传输的零拷贝。默认的**DefaultFileRegion内部封装了FileChannel** ，**使用FileChannel的transferTo方法实现了CPU零拷贝**
+- Netty中提供**CompositeByteBuf类，用于将多个ByteBuf合并成逻辑上的ByteBuf（原数据并没有物理意义上的合并）**，避免了将多个ByteBuf拷贝成一个ByteBuf的过程
+- ByteBuf支持**slice方法可以将ByteBuf分解成多个共享内存区域的ByteBuf（数据还是共享的原ByteBuf）**，避免了内存拷贝
+
+## 9 Netty架构
 
 ​		Netty是**异步事件驱动**的socket框架，基于Reactor架构，使用jdk的NIO的多路复用（当然不止NIO，这里主要讨论NIO）
 
@@ -372,7 +404,7 @@ ServerBootstrap启动客户端的工具，用于将我们设置的各种ChannelH
 
 ​	**在NioEventLoop线程内部，线程一直死循环处理IO事件和Runnable任务，且根据内部的ioRation来分配处理时间**。从Channel注册后，Channel的整个生命周期都会在当前NioEventLoop中。所以，一个NioEventLoop可能管理多个SocketChannel。**同时，因为单线程处理IO事件和Runnable任务，所以，不要添加执行时间过长的Runnable，否则，都会影响到线程处理其他Channel的时间，特别是在IO事件频繁的情况下**
 
-## 9 FastThreadLocal
+## 10 FastThreadLocal
 
 ​		FastThreadLocal是ThreadLocal的一种变体，和ThreadLocal设计理念一致，都是将数据存取在当前线程环境中，不同的线程从ThreadLocal中只能获取到当前线程对应的那个数据，避免了加锁，典型的空间换时间理念。
 
@@ -380,7 +412,7 @@ ServerBootstrap启动客户端的工具，用于将我们设置的各种ChannelH
 
 ​		**在InternalThreadLocalMap内部，使用数组来维护FastThreadLocal需要保存的值，每个FastThreadLocal在创建时，都会设置一个固定的数组索引（InternalThreadLocalMap#nextIndex字段自增获取）保存在内部的index字段，在利用FastThreadLocal设置值时，直接将我们需要保存的value设置在io.netty.util.internal.UnpaddedInternalThreadLocalMap#indexedVariables这个数组的索引位置，取出是也是一样的道理，直接从这个索引取。所以，FastThreadLocal的设置和取出复杂度很低（基本没有，因为索引位置时已知的，利用数组的索引直接定位到我们需要的数据）**
 
-### 9.1 回忆一下在ThreadLocal中是怎么设置并取值的？为什么要出现这种差异？以及这两种结构的用法
+### 10.1 回忆一下在ThreadLocal中是怎么设置并取值的？为什么要出现这种差异？以及这两种结构的用法
 
 ​		ThreadLocal的设值和取值是通过其内部的ThreadLocalMap实现的，在ThreadLocalMap内部用数组保存了Entry节点，Entry接口内部保存了当前ThreadLocal和我们设置的值。但在设置时，会先通过ThreadLocal的hash值和table长度计算出在ThreadLocalMap#table数组的索引位置。
 
@@ -388,6 +420,43 @@ ServerBootstrap启动客户端的工具，用于将我们设置的各种ChannelH
 
 ​		**所以，很明显ThreadLocal在设值和取值时有很大可能花费的时间要比FastThreadLocal更久，最坏的情况就是要比较整个数组里的所有数据，最好的情况就是hash和table长度计算出来得那个索引位置。更不用说ThreadLocal在设值和取值时，如果碰到泄露的Entry，还需要清理**
 
-​		ThreadLocal之所以设计成这样是考虑到程序中可能会回收掉ThreadLocal，在一个具有很短生命周期的ThreadLocal里，即使它被回收了，我们也能通过弱引用的特性来探测到其对应的Entry结构，并回收其对于的Entry。而FastThreadLocal并没有使用弱引用，所以如果FastThreadLocal不能被程序直接访问到，那就会触发这部分的内存泄露了。
+​		ThreadLocal之所以设计成这样是考虑到程序中可能会回收掉ThreadLocal，在一个具有很短生命周期的ThreadLocal里，即使它被回收了，我们也能通过弱引用的特性来探测到其对应的Entry结构，并回收其对于的Entry。而FastThreadLocal并没有使用弱引用，**所以如果FastThreadLocal不能被程序直接访问到而它又没有做remove操作，那就会触发这部分的内存泄露了**。
 
-​		**所以，FastThreadLocal的正确使用方式应该是在程序中使用FastThreadLocal的地方，就应该保持FastThreadLocal的持久性（不要被垃圾回收）**。如果你在程序中创建了一个会被回收的ThreadLocal，就该使用ThreadLocal，不要使用FastThreadLocal。其实对于正常情况来说，ThreadLocal就应该不需要被垃圾回收。
+​		**所以，FastThreadLocal的正确使用方式应该是在程序中使用FastThreadLocal的地方，就应该保持FastThreadLocal的持久性（不要被垃圾回收）。但如果FastThreadLocal生命周期比当前线程短，那么它使用完毕后就应该操作remove来删除数据（netty设计了FastThreadLocalRunnable来对Runnable进行包装，这样我们就不用主动操作remove了）**。如果你在程序中创建了一个会被回收的ThreadLocal，记得调用remove方法或对它进行FastThreadLocalRunnable包装
+
+### 10.2 FastThreadLocal和ThreadLocal优劣对比
+
+#### 10.2.1 ThreadLocal
+
+- 优势
+  - 弱引用设计，不需要主动调用remove也能避免内存泄漏
+- 劣势
+  - 弱引用也会增加垃圾回收工作的压力
+  - 基于线性探测发解决hash冲突，也会导致查询和插入时间增加（相比链地址法会使用连续且紧凑的内存空间来存储数据，寻址时也会更快），甚至在删除时也要重新排列这后的数据
+
+#### 10.2.2 FastThreadLocal
+
+- 优势
+  - 查询和删除快（毕竟已知数据index，查询，删除和重新set的复杂度很低）
+- 劣势
+  - 非弱引用设计，必须主动调用remove，否则可能引发内存泄漏
+  - 空间使用多（因为index是递增的，当一个FastThreadLocal不再使用了且被remove掉后，数组对应的位置也不会在放其他数据）
+
+## 11 NIO相关
+
+| Origin |       Channel       | OP_ACCEPT | OP_CONNECT | OP_WRITE | OP_READ |
+| :----: | :-----------------: | :-------: | :--------: | :------: | :-----: |
+| client |    SocketChannel    |           |     Y      |    Y     |    Y    |
+| server | ServerSocketChannel |     Y     |            |          |         |
+| server |    SocketChannel    |           |            |    Y     |    Y    |
+
+- `OP_ACCEPT`：当收到一个客户端的连接请求时，该操作就绪。这是`ServerSocketChannel`上唯一有效的操作。
+
+- `OP_CONNECT`：只有客户端`SocketChannel`会注册该操作，当客户端调用`SocketChannel.connect()`时，该操作会就绪。
+
+- `OP_READ`：该操作对客户端和服务端的`SocketChannel`都有效，当OS的读缓冲区中有数据可读时，该操作就绪。
+
+- `OP_WRITE`：该操作对客户端和服务端的`SocketChannel`都有效，当OS的写缓冲区中有空闲的空间时(大部分时候都有)，该操作就绪。
+
+  >  OP_WRITE  事件相对特殊，一般情况，不应该注册`OP_WRITE事件`，**`OP_WRITE`的就绪条件为操作系统内核缓冲区有空闲空间**(`OP_WRITE事件`是在`Socket`发送缓冲区中的可用字节数大于或等于其低水位标记`SO_SNDLOWAT`时发生)，而写缓冲区绝大部分事件都是有空闲空间的，所以当你注册写事件后，写操作一z直就是就绪的，这样会导致`Selector`处理线程会占用整个CPU的资源。所以最佳实践是当你确实有数据写入时再注册`OP_WRITE事件`，并且在写完以后马上取消注册
+

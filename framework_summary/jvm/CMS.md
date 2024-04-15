@@ -25,7 +25,7 @@
 
 ### 2.1cms gc触发条件总结
 
-- [原文](https://club.perfma.com/article/190389)
+- [原文](https://heapdump.cn/article/190389)
 -  foreground collector  ：空间分配不够触发
 - background collector
   - 配置了**ExplicitGCInvokesConcurrent** 参数，且由**System.gc()**调用

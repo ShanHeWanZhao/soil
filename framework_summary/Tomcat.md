@@ -2,7 +2,7 @@
 
 ## 1 Tomcat架构
 
-​	Tomcat类似与树形结构，根节点为Server，代表当前tomcat进程。Server下可以有多个Service，代表多种服务。每个Service可以有多个Connector，代表每个Service可以监听多个端口，但只会有一个Engine。Engine可管理多个Host，Host又可以管理多个Context，Context又可以管理多个Wrapper（一个Wrapper即一个Servlet）。
+​	Tomcat类似于树形结构，根节点为Server，代表当前tomcat进程。Server下可以有多个Service，代表多种服务。每个Service可以有多个Connector，代表每个Service可以监听多个端口，但只会有一个Engine。Engine可管理多个Host，Host又可以管理多个Context，Context又可以管理多个Wrapper（一个Wrapper即一个Servlet）。
 
 ​		以一次http请求来分析各个组件的作用，假如url为：http://www.github.com/demo/user/get，这个请求首先请求到Service下对应端口的Connector，通过这个Connector拿到关联的Service，Service内部又一个路由器Mapper，通过这个org.apache.catalina.mapper.Mapper#map方法解析解析url找出最符合条件的Host、Context、Wrapper。在这个例子中www.github.com对应Host，demo对应Context，user/get对应Wrapper
 
@@ -89,9 +89,9 @@ Poller在内部会将PollerEvent中对应的SocketChannel和感兴趣的事件�
 
 ### 3.2 Mapper
 
-​		路由器，当http请求发送过来后，Mapperf负责通过请求的url找到对应的Host、Context、Wrapper，最终就是要找到具体由哪个Servlet来转发请求。Host、Context、Wrapper可以看做是多分支的树形结构。都存在多个。所以，Mapper内部是存了多个Host，每个Host又存了多个Context，每个Context又存了多个Wrapper
+​		路由器，当http请求发送过来后，Mapper负责通过请求的url找到对应的Host、Context、Wrapper，最终就是要找到具体由哪个Servlet来转发请求。Host、Context、Wrapper可以看做是多分支的树形结构。都存在多个。所以，Mapper内部是存了多个Host，每个Host又存了多个Context，每个Context又存了多个Wrapper
 
-## 4 容器Container
+## 4 Container(容器)
 
 ​		Container接口是tomcat容器的标准接口，ContainerBase为Container接口的实现抽象类，构造了容器需要的公共字段，tomcat的每个容器都通过继承ContainerBase来实现容器。每个容器都有属于自己的Pipeline管道，也存在自己的子容器集和（child Container）。当一个http请求到达后，解析完http数据，通过最顶级的容器Engine的管道，调用内部的Valve阀门，依次将请求传递到对应子容器的管道中的阀门里（Engine -> Host -> Context -> Wrapper），最后再通过过滤器到达Servlet
 
@@ -195,25 +195,51 @@ protected synchronized void startInternal() throws LifecycleException {
 
 ### 4.1 Engine
 
-​	Engine是Tomcat最顶层的容器，和Service是一对一的关系，在他们内部互相保存了对方的引用，默认实现类时StandardEngine
+​		**Engine是Tomcat最顶层的容器（没有父容器），和Service是一对一的关系，在他们内部互相保存了对方的引用，默认实现类时StandardEngine**
 
 StandardEngine重点字段（Engine这个容器本身没有什么特殊的意义，所以初始化和启动方法都是直接使用父类ContainerBase去启动子容器的，就没啥好说的了）
 
 ```java
+// 构造方法
+public StandardEngine() {
+    super();
+    // 向pipeline添加StandardEngineValve作为basic（这个basic valve也会作为pipeline中最后一个valve来处理request）
+    pipeline.setBasic(new StandardEngineValve());
+    /* Set the jmvRoute using the system property jvmRoute */
+    try {
+        setJvmRoute(System.getProperty("jvmRoute"));
+    } catch(Exception ex) {
+        log.warn(sm.getString("standardEngine.jvmRouteFail"));
+    }
+    // By default, the engine will hold the reloading thread
+    // 每10秒执行一次后台任务
+    backgroundProcessorDelay = 10;
+
+}
 /**
  * 默认主机名，当请求没有精确或模糊匹配到指定的主机名，就会使用这个
  * server.xml里的Engine标签里的defaultHost属性值（默认为localhost）
  */
 private String defaultHost = null;
+/**
+* 当前Engine关联的Service（一对一的关系）
+*/
+private Service service = null;
 ```
 
 ### 4.2 Host
 
-​	Host作为Engine的子容器，默认实现为StandardHost，代表了请求host部分的抽象。当一个http请求到达时，会根据器url的host部分，找到对应名字的StandardHost，如果没有，则会使用默认的Host（即localhost）
+​		**Host作为Engine的子容器，默认实现为StandardHost，代表了请求host部分的抽象。当一个http请求到达时，会根据器url的host部分，找到对应名字的StandardHost，如果没有，则会使用默认的Host（即localhost）**
 
 StandardHost重点字段（初始化和启动方法还是调用父类）
 
 ```java
+public StandardHost() {
+    // StandardHostValve也会作为当前容器的pipeline的last value
+    pipeline.setBasic(new StandardHostValve());
+
+}
+
 /**
  * 当前Host的别名，匹配别名也能匹配到当前Host
  */
@@ -242,13 +268,11 @@ private boolean autoDeploy = true;
 /**
  * 添加到当前Host的子容器Context里的监听器（ContextConfig）
  */
-private String configClass =
-    "org.apache.catalina.startup.ContextConfig";
+private String configClass = "org.apache.catalina.startup.ContextConfig";
 /**
  * 当前Host的子容器Context的实现类
  */
-private String contextClass =
-    "org.apache.catalina.core.StandardContext";
+private String contextClass = "org.apache.catalina.core.StandardContext";
 /**
  * 启动时部署Context
  */
@@ -293,13 +317,24 @@ protected void deployApps() {
 }
 ```
 
-### 4.2 Context
+### 4.3 Context
 
-Context时tomcat中最重要的一个组件，一个Context就代表一个web环境，有最重要的path属性（默认为/，即代表根路径），对应一个ServletContext，默认实现为StandardContext。
+​		**Context时tomcat中最重要的一个组件，一个Context就代表一个web环境，有最重要的path属性（默认为/，即代表根路径），对应一个ServletContext，默认实现为StandardContext。**
 
-StandardContext重点字段：
+StandardContext的构造方法和重点字段：
 
 ```java
+// 构造方法
+public StandardContext() {
+    // 添加StandardContextValve，这个valve的主要作用就是限制 /WEB-INF和/META-INF 目录下资源的不可访问
+    pipeline.setBasic(new StandardContextValve());
+    broadcaster = new NotificationBroadcasterSupport();
+    // Set defaults
+    if (!Globals.STRICT_SERVLET_COMPLIANCE) {
+        // Strict servlet compliance requires all extension mapped servlets
+        // to be checked against welcome files
+        resourceOnlyServlets.add("jsp");
+}  
 // 关联的ServletContext实现
 protected ApplicationContext context = null;
 // 当前Context的路径
@@ -328,8 +363,7 @@ private boolean validateClientProvidedNewSessionId = true;
 StandardContext的start重要流程：
 
 - 设置Loader为WebappLoader（和当前Context的使用的类加载器有关）
-- 设置CookieProcessor（默认为Rfc6265CookieProcessor）
-- 启动WebappLoader（创建ParallelWebappClassLoader）
+- 设置CookieProcessor（默认为Rfc6265CookieProcessor）   启动WebappLoader（创建ParallelWebappClassLoader）
 - 将ParallelWebappClassLoader绑定到当前线程环境
 - **发送configure_start事件，让内部的监听器ContextConfig开始解析web.xml和其他jar包里的web-fragment.xml，并将解析出来的WebXml结构的信息封装一下导入到StandardContext中（比如将servlet配置构造成Warpper作为Context的子容器）**
 - 启动子容器（上面一步导入的Wrapper，StandardWrapper启动阶段不会做什么）
@@ -341,11 +375,42 @@ StandardContext的start重要流程：
   - **WebappLoader的后台任务检测：如果当前Context开启了重载检测（默认不开启），那么就会检测ParallelWebappClassLoader所加载的Class和jar是否有修改，如果有修改，就会重启当前Context（先stop，再重新start）**
   - **StandardManager的后台任务检测：清理过期session**
 
-### 4.3 Wrapper
+### 4.4 Wrapper
 
 ​		Wrapper就是Servlet的抽象，一个Wrapper对应一个Servlet，在ContextConfig监听器解析web.xml和web-fragment.xml后，会将解析到的Servlet封装为StandardWrapper，并将其作为Context的子容器。
 
-​		**Servlet的实例化都在org.apache.catalina.core.StandardWrapper#load（实例化Servlet和调用init接口）里，而在StandardContext启动期间，只会load在xml里配置loadOnStartup > 0 的Servlet**
+​		**Servlet的实例化方法org.apache.catalina.core.StandardWrapper#load（实例化Servlet和调用init接口），而在StandardContext启动期间，只会load在xml里配置loadOnStartup > 0 的Servlet**
+
+StandardWrapper的构造方法和重点字段：
+
+```java
+public StandardWrapper() {
+    // 向pipeline添加StandardWrapperValve，这个valve主要实例化servlet并构造filter来处理请求
+    swValve=new StandardWrapperValve();
+    pipeline.setBasic(swValve);
+    broadcaster = new NotificationBroadcasterSupport();
+
+}
+// servlet实例（针对多线程共用时的）
+protected volatile Servlet instance = null;
+// 当前servlet是否已经初始化（就是调用了init接口）
+protected volatile boolean instanceInitialized = false;
+
+protected int loadOnStartup = -1;
+// 当前servlet的InitParam参数缓存
+protected HashMap<String, String> parameters = new HashMap<>();
+// servlet的类全名
+protected String servletClass = null;
+// 是否是单线程模式，如果为true，代表Servlet在每个运行的线程中是不同的（多例）。正常的servlet都应该是false
+protected volatile boolean singleThreadModel = false;
+// 单线程模式下默认最多20个单线程servlet
+protected int maxInstances = 20;
+// 单线程模式下servlet的实例树
+protected int nInstances = 0;
+// 单线程模式下基于栈实现的servlet池
+protected Stack<Servlet> instancePool = null;
+
+```
 
 ## 5 http请求到达tomcat时的主要流程
 
@@ -370,7 +435,7 @@ loadClass方法流程
 - 从当前类加载器的native中查找是否已经缓存过
 - 从系统类加载器中查找当前Class是否加载过（加载过就直接返回）
 - 设置了delegate为true，则尝试使用tomcat的common类加载器加载
-- 使用当前类加载器从WEB-INF/classes和WEB-INF/lib目录中加载
+- **使用当前类加载器从WEB-INF/classes和WEB-INF/lib目录中加载**
 
 ## 7 springboot + 嵌入式tomcat的启动
 

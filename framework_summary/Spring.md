@@ -1,4 +1,4 @@
-# Spring(5.1.x)
+#   Spring(5.1.x)
 ## 1.bean实例化过程（BeanFactory#getBean方法看）
 
 ### 1.1 循环引用
@@ -24,7 +24,7 @@
 ### 1.2 bean的创建流程
 
 1. 实例化bean
-2. 放入三级缓存（根据**AbstractAutowireCapableBeanFactory#allowCircularReferences**字段决定）
+2. 将其工厂对象（ObjectFactory）放入三级缓存（根据**AbstractAutowireCapableBeanFactory#allowCircularReferences**字段决定）
 3. 填充依赖bean（**AbstractAutowireCapableBeanFactory#populateBean**）
 4. 初始化bean（**AbstractAutowireCapableBeanFactory#initializeBean**）
    - 4.1 调用**BeanPostProcessor#postProcessBeforeInitialization方法**
@@ -32,24 +32,11 @@
    - 4.3 调用**BeanPostProcessor#postProcessAfterInitialization**（AOP相关实现）
 5. 注册destory相关方法（**AbstractBeanFactory#registerDisposableBeanIfNecessary**）
 
-## 2. 容器的refresh(AbstractApplicationContext#refresh)
+## 2.重要的后置处理器
 
-1. 准备BeanFactory
-2. 获取并实例化容器中的**BeanDefinitionRegistryPostProcessor**，随后调用**postProcessBeanDefinitionRegistry**方法
-3. 获取并实例化容器中的**BeanFactoryPostProcessor**，随后调用**postProcessBeanFactory**方法
-4. 获取并实例化容器中的**BeanPostProcessor**，放入BeanFactory中，以便后续其他bean实例化使用
-5. 为上下文初始化Message源，国际化处理
-6. 初始化事件广播器，注册这个bean到容器中（**ApplicationEventMulticaster**）
-7. onRefresh（留给子类实现，比如初始化web环境）
-8. 注册各种**ApplicationListener**
-9. 初始化剩下的**非lazy bean**
-10. 完成刷新，实现**SmartLifecycle**接口的bean开始启动，随后发布**ContextRefreshedEvent**事件
+### 2.1BeanPostProcessor
 
-## 3.重要的后置处理器
-
-### 3.1BeanPostProcessor
-
-#### 3.1.1 CommonAnnotationBeanPostProcessor
+#### 2.1.1 CommonAnnotationBeanPostProcessor
 
 ​		用来处理**@javax.annotation.Resource**、**@javax.annotation.PostConstruct**、**@javax.annotation.PreDestroy**、**@javax.ejb.EJB**、**@javax.xml.ws.WebServiceRef**注解的处理器
 
@@ -72,15 +59,13 @@
 >
 > **按beanName匹配**：指定了@Resource的name属性 或 CommonAnnotationBeanPostProcessor#fallbackToDefaultTypeMatch为false或存在这个字段名的bean（就是上面的反向情况）
 
-#### 3.1.2 AutowiredAnnotationBeanPostProcessor
+#### 2.1.2 AutowiredAnnotationBeanPostProcessor
 
 用来处理**@org.springframework.beans.factory.annotation.Autowired**、**@org.springframework.beans.factory.annotation.Value**、**@javax.inject.Inject**注解的处理器
 
-#### 3.1.3 AnnotationAwareAspectJAutoProxyCreator（非常重要）
+#### 2.1.3 AnnotationAwareAspectJAutoProxyCreator（非常重要）
 
-​		Spring实现动态代理的Bean后置处理器，具有最高的执行优先级（表示是最先被执行的BeanPostProcessor。设置最高优先级的代码在org.springframework.aop.config.AopConfigUtils#registerOrEscalateApcAsRequired中）。其父类的postProcessAfterInitialization方法用在bean初始化（各种初始化方法调用完）后调用，用来判断当前bean是否能被增强，如果能则构建Advisor链，并使用ProxyFactory对其增强，增强后返回的bean已经是一个新的代理bean了。
-
-**Advisor**：增强器，一个Advisor对应一个切面。既包含Advice，也包含过滤器（判断bean是否需要增强的东西），所以能用一个Advisor来判断任意一个bean是否能被它增强，并提供增强的Advice。
+​		Spring实现自动装配动态代理的Bean后置处理器，具有最高的执行优先级（表示是最先被执行的BeanPostProcessor。设置最高优先级的代码在org.springframework.aop.config.AopConfigUtils#registerOrEscalateApcAsRequired中）。其父类的postProcessAfterInitialization方法用在bean初始化（各种初始化方法调用完）后调用，用来判断当前bean是否能被增强，如果能则构建Advisor链，并使用ProxyFactory对其增强，增强后返回的bean已经是一个新的代理bean了。
 
 **postProcessAfterInitialization方法**：找到能对这个bean进行增强的Advisor，利用ProxyFactory增强这个bean。ProxyFactory是创建代理bean的核心，代理bean创建出来就是一个新的bean，新的bean只提供切面逻辑的实现，用到原始bean的方法时，还是会交给原始bean去执行，原始bean并没有做任何改变，将原来的bean封装为TargetSource以供去执行真正的原始方法。
 
@@ -92,7 +77,7 @@
      * 自定的：我们自己用@org.aspectj.lang.annotation.Aspect注解定义的切面类，org.springframework.aop.aspectj.annotation.AspectJAdvisorFactory#getAdvisors方法用来将@Aspect注解定义的切面类解析为一系列的Advisor，一个注解切面对应一个InstantiationModelAwarePointcutAdvisorImpl（Advisor的实现类）
   2. 用这些Advisor，依次对bean进行匹配，IntroductionAdvisor只需匹配类（ClassFilter），PointcutAdvisor既需匹配类（ClassFilter），也需要匹配方法（MethodMatcher）。只要能匹配上，就代表这个bean可以用这个Advisor进行增强。再收集到能对当前bean进行增强的Advisor，准备下一步的增强
 
-##### 3.1.3.1 cglib增强
+##### 2.1.3.1 cglib增强
 
 ```java
 // CglibAopProxy的创建代理方法
@@ -276,7 +261,7 @@ public Object proceed() throws Throwable {
 
 
 
-##### 3.1.3.2 jdk增强
+##### 2.1.3.2 jdk增强
 
 ```java
 // JdkDynamicAopProxy的创建代理方法，该代理的InvocationHandler就为JdkDynamicAopProxy本身
@@ -291,23 +276,23 @@ public Object getProxy(@Nullable ClassLoader classLoader) {
 }
 ```
 
-##### 3.1.3.3 总结
+##### 2.1.3.3 总结
 
 ​		不论是cglib还是jdk的增强，增强的实现都可以总结为对原方法可使用的Advisor的收集，再构造成ReflectiveMethodInvocation（每次调用拦截方法时都会构造一个ReflectiveMethodInvocation），由ReflectiveMethodInvocation去进行动态增强器（一般都和参数有关）的判断，执行拦截器和拦截的传播。
 
 ​		且Spring都会默认对代理bean实现两个接口（代码实现在AopProxyUtils#completeProxiedInterfaces中），分别是**SpringProxy和Advised**。SpringProxy用来表示当前bean已经被spring的增强了，而Advised则可以用来拿到原始bean（所以，要在代理bean中拿到原始bean，直接将代理bean强转为Advised，再利用其getTargetSource方法得到原始非代理bean）
 
-#### 3.1.4 AsyncAnnotationBeanPostProcessor
+#### 2.1.4 AsyncAnnotationBeanPostProcessor
 
 用来处理注解**@org.springframework.scheduling.annotation.Async**和**@javax.ejb.Asynchronous**，用来支持异步，也是通过动态代理实现的
 
-#### 3.1.5 ScheduledAnnotationBeanPostProcessor
+#### 2.1.5 ScheduledAnnotationBeanPostProcessor
 
 用来处理**@org.springframework.scheduling.annotation.Scheduled**和**@org.springframework.scheduling.annotation.Schedules**注解的，提供定时任务支持，非动态代理实现
 
-### 3.3 BeanFactoryPostProcessor和BeanDefinitionRegistryPostProcessor
+### 2.3 BeanFactoryPostProcessor和BeanDefinitionRegistryPostProcessor
 
-#### 3.3.1 ConfigurationClassPostProcessor（非常重要，一切的开始）
+#### 2.3.1 ConfigurationClassPostProcessor（非常重要，一切的开始）
 
 ​		实例化AnnotatedBeanDefinitionReader的构造方法中，就会构造一个ConfigurationClassPostProcessor的BeanDefinition并注册到容器中，等待容器refresh阶段处理BeanFactoryPostProcessor时调用，用来处理**@Configuration、@PropertySource、@ComponentScan、@Import、@ImportResource、@Bean、@Conditional**等重要注解，**最终的目的就是注册所有的BeanDefinition（包括包扫描、@Bean导入的、内部类配置、自动配置、导入的xml配置等等）等待这些BeanDefinition后续的使用。整个ConfigurationClassPostProcessor处理容器bean就是递归，直到没有组件为止（新扫描出来的容器组件它完全可能又导入其他组件）**
 
@@ -323,7 +308,7 @@ public Object getProxy(@Nullable ClassLoader classLoader) {
 4. 处理@ComponentScan和@ComponentScans注解，并对解析出来的BeanDefinition进行递归解析
    1. 扫描指定包下的所有组件时，通过路劲搜索，将指定包下的所有Class文件每个都封装为org.springframework.core.io.Resource对象（此时还没加载这个Class）。
    2. 利用ASM，将Class文件读取到内存里进行解析
-   3. 判断是否能成为一个BeanDefinition（比如是否被指定的注解标注，spring默认用的时@Component，而我们可以灵活配置扫描指定的注解（比如mybatis中@Mapper的扫描，feign接口的@FeignClient扫描）。是否需要被排除等等）
+   3. 判断是否能成为一个BeanDefinition（比如是否被指定的注解标注，spring默认用的是@Component，而我们可以灵活配置扫描指定的注解（比如mybatis中@Mapper的扫描，feign接口的@FeignClient扫描）。是否需要被排除等等）
    4. 返回合格的BeanDefinition数组，交由调用者处理
    5. **为什么要用ASM，而不是直接加载这个Class**：因为在Class加载前，我们还不确定他是否会被容器管理，甚至它都不会被被使用，一个从来不被使用的Class文件，我们就没必要加载到虚拟机里了，所以利用ASM，直接解析它的字节码文件，看看是否包含指定的注解，在加载到虚拟机中
 5. 处理@Import注解。这个注解就经常用在各种@Enable...前缀开头的注解里，用来导入指定的BeanDefinition来开启某种功能。**DeferredImportSelector是一种特别的Import，用来延迟导入。**在springboot种@EnableAutoConfiguration注解就是导入的实现DeferredImportSelector的类。**DeferredImportSelector专门用在最后才处理（等解析都处理完了后）**。为什么有这个，不妨设想一下，如果你要自己配置一个DataSource的bean，但容器中只允许存在一个，而springboot的DataSourceAutoConfiguration也帮你准备了一个DataSource，这时@ConditionalOnMissingBean注解可以发挥作用，但如果不是DeferredImportSelector起作用了，你就不能保证解析顺序，可能就忽略了你的DatsSource，而使用DataSourceAutoConfiguration里的了。所以重点：**我们没必要担心自动配置和我们的配置解析的顺序问题，始终都是我们配置的会先被解析，所以，我们可以放心的做一些定制来覆盖自动配置里的Bean。**
@@ -332,6 +317,36 @@ public Object getProxy(@Nullable ClassLoader classLoader) {
 8. 上面的所有组件递归处理完毕后，再处理第5点提到的DeferredImportSelector。springboot里开启自动装配的注解@EnableAutoConfiguration就会导入AutoConfigurationImportSelector，用来导入jar包下META-INF/spring.factories里自动装配的bean
 
 等解析完后，按解析顺序（LinkedHashMap维持的解析顺序）就将每个ConfigurationClass里导入的其他BeanDefinition放入容器中，等待后续的实例化（@Bean、@ImportResource、@Import等注解导入的BeanDefinition)
+
+
+
+## 3. AOP相关
+
+### 3.1 抽象类AbstractAdvisorAutoProxyCreator（实现了BeanPostProcessor）
+
+这个类专注于实现容器中所有aop的自动增强，其主要的两个子类
+
+- InfrastructureAdvisorAutoProxyCreator：不会处理注解的自动代理（@Aspect注解等），只会处理IOC容器中存在的所有Advisor
+- **AnnotationAwareAspectJAutoProxyCreator**（默认使用）：注解相关的aop自动处理器，也会处理IOC容器中存在的Advisor。它会在bean的postProcessAfterInitialization生效，拿到所有的Advisor，并对这个bean进行匹配，以此来过滤出能用的Advisor对bean进行增强。这个BeanPostProcessor具有最高的优先级
+
+### 3.2 抽象类AbstractAdvisingBeanPostProcessor（实现了BeanPostProcessor）
+
+​		**该类希望不会对bean进行proxy，这个类提供了一个advisor字段供子类拓展，在该抽象类的postProcessAfterInitialization方法中它会先对bean进行判断是否已经增强过（AnnotationAwareAspectJAutoProxyCreator具有最高的优先级，可能已经对这个bean进行代理过了），已经代理过的bean他判断后会将字段advisor添加到代理bean的advisor缓存链中，并清除方法拦截的增强缓存**。它具有固定的advisor，其实现类也专注于处理这个advisor的增强，主要实现类
+
+- AsyncAnnotationBeanPostProcessor：处理@Async注解
+- MethodValidationPostProcessor：处理方法上@Validated注解
+
+### 3.3 Advisor
+
+​		增强器，一个Advisor对应一个切面。既包含Advice，也包含过滤器（判断bean是否需要增强的东西）。所以能用一个Advisor来判断任意一个bean是否能被它增强，并提供增强的Advice。
+
+​		主要子接口为PointcutAdvisor，PointcutAdvisor提供了Pointcut，利用这个Pointcut即可以bean的class和method进行匹配看它是否能被增强。而Advisor获取的Advice则为真正执行代理方法的拦截器。
+
+### 3.4 总结
+
+​		一个bean可能会使用多个切面，spring不希望每次应用切面都对这个bean创建新的proxy，从而生成了新的class文件，且造成了proxy层层的嵌套。所以，spring提供的AnnotationAwareAspectJAutoProxyCreator不仅**具有最高的优先级，且会将容器中所有的Advisor bean和我们自己配置的切面（@Aspect注解类）构造成Advosir链（AdvisedSupport#advisors字段）保存在这个增强类中，当对这个代理bean进行方法调用时，会从这个Advisor链来依次匹配该方法是否能被这个Advisor代理并缓存能代理的Advisor集合。这样，不论多少切面会被用在这个bean上，这个bean最终也只会被proxy一次。**
+
+​		而spring还提供了**AbstractAdvisingBeanPostProcessor的扩展，这个BeanPostProcessor可以不依赖@EnableAspectJAutoProxy注解也能开启代理**。在内部它会进行一系列的判断，当前bean是proxy时只是简单的将内部的Advisor放进Advisor链中，从而避免对这个bean创建新的proxy。而如果当前bean不是proxy（说明没有开启spring的自动代理机制），则会对这个bean创建proxy
 
 
 
@@ -349,14 +364,17 @@ TransactionInterceptor执行的步骤
 > 2. 获取BeanFactory中的PlatformTransactionManager（可以由@Transactional指定）
 > 3. 构建TransactionStatus（每个@Transactional都有一个TransactionStatus）
 >    1. 获取当前线程中的ConnectionHolder，并以此判断是否时嵌套事务（ConnectionHolder不为空，就代表肯定时嵌套事务）
->    2. apply 事务的传播策略（PROPAGATION），主要逻辑就在org.springframework.transaction.support.AbstractPlatformTransactionManager#getTransaction方法中
->       1. **PROPAGATION_REQUIRED**（默认）：不存在就新建，存在就加入
->       2. **PROPAGATION_SUPPORTS**：源码中并没有处理这种的传播策略。所以，它的作用是：存在事务就加入，不存在就以非事务的方式运行
->       3. **PROPAGATION_MANDATORY**：支持已存在的事务，不存在则直接抛异常
->       4. **PROPAGATION_REQUIRES_NEW**：没事务就创建一个，有事务就新建一个，这样就会存在两个事务，也就至少有两此commit或rollback。新建事务时会将原事务封装为SuspendedResourcesHolder，在重新获取一个新的数据库连接开启事务，等这部分运行完，在把SuspendedResourcesHolder复原
->       5. **PROPAGATION_NOT_SUPPORTED**：以非事务的方式运行（有事务就暂停事务，没有就啥也不做），实现和上面的差不多，只是这是不需要新建事务了
->       6. **PROPAGATION_NEVER**：强制性的不支持事务，要是当前存在事务，就直接抛异常
->       7. **PROPAGATION_NESTED**：不存在就新建，存在就新开一个嵌套的事务。（先检查**nestedTransactionAllowed，为false就抛异常了，代表不支持嵌套事务。不过默认为true**。）和PROPAGATION_REQUIRES_NEW的区别在于这是用数据库的Savepoint实现，至始至终只会存在一个事务，如果当前回滚，也只会退回到Savepoint，不会对外层的事务造成影响，如果都能提交，最终也只有一次真正的事务commit。所以，注册的TransactionSynchronization钩子函数也只会等待整个事务的结束来回调。如果不支持安全点（JTA），那实现就完全等于PROPAGATION_REQUIRES_NEW
+>    2. apply 事务的传播策略（PROPAGATION，有7种），主要逻辑就在org.springframework.transaction.support.AbstractPlatformTransactionManager#getTransaction方法中，按功能进行分类
+>       1. **肯定派，必须存在事务**
+>          - **PROPAGATION_REQUIRED**（默认）：不存在就新建，存在就加入
+>          - **PROPAGATION_REQUIRES_NEW**：始终新建一个事务，这样可能就会存在两个事务，也就至少有两此commit或rollback。存在原事务时会将原事务封装为SuspendedResourcesHolder，再重新获取一个新的数据库连接开启事务，等这个新事物运行完，再把SuspendedResourcesHolder复原
+>          - **PROPAGATION_NESTED**：不存在就新建，存在就新开一个嵌套的事务。（先检查**nestedTransactionAllowed，为false就抛异常了，代表不支持嵌套事务。不过默认为true**。）和PROPAGATION_REQUIRES_NEW的区别在于这是用数据库的Savepoint实现，至始至终只会存在一个事务，如果当前回滚，也只会退回到Savepoint，不会对外层的事务造成影响，如果都能提交，最终也只有一次真正的事务commit。所以，注册的TransactionSynchronization钩子函数也只会等待整个事务的结束来回调。如果不支持安全点（JTA），那实现就完全等于PROPAGATION_REQUIRES_NEW
+>          - **PROPAGATION_MANDATORY**：支持已存在的事务，**不存在则直接抛异常**
+>       2. **中立派，不一定有事务**
+>          - **PROPAGATION_SUPPORTS**：源码中并没有处理这种的传播策略。所以，它的作用是：存在事务就加入，不存在就以非事务的方式运行
+>       3. **否定派，不支持事务**
+>          - **PROPAGATION_NOT_SUPPORTED**：以非事务的方式运行（有事务就暂停事务，没有就啥也不做），实现和上面的差不多，只是这是不需要新建事务了
+>          - **PROPAGATION_NEVER**：强制性的不支持事务，要是当前存在事务，就直接抛异常
 > 4. 执行业务代码
 > 5. 处理异常和commit和判断是否需要提交或回滚，并回调各种钩子函数：只有最初的事务开启者才能够真正的提交或回滚
 
@@ -652,7 +670,20 @@ public void multicastEvent(final ApplicationEvent event, @Nullable ResolvableTyp
 
 ​	将容器中已有的ApplicationListener实例直接注册到org.springframework.context.event.AbstractApplicationEventMulticaster.ListenerRetriever#applicationListeners里，而将还未实例化的ApplicationListener之注册其beanName到org.springframework.context.event.AbstractApplicationEventMulticaster.ListenerRetriever#applicationListenerBeans中，让容器走正常流程去实例化这些bean。
 
-## 7 spring使用的设计模式举例
+## 7. 容器的refresh(AbstractApplicationContext#refresh)
+
+1. 准备BeanFactory
+2. 获取并实例化容器中的**BeanDefinitionRegistryPostProcessor**，随后调用**postProcessBeanDefinitionRegistry**方法
+3. 获取并实例化容器中的**BeanFactoryPostProcessor**，随后调用**postProcessBeanFactory**方法
+4. 获取并实例化容器中的**BeanPostProcessor**，放入BeanFactory中，以便后续其他bean实例化使用
+5. 为上下文初始化Message源，国际化处理
+6. 初始化事件广播器，注册这个bean到容器中（**ApplicationEventMulticaster**）
+7. onRefresh（留给子类实现，比如初始化web环境）
+8. 注册各种**ApplicationListener**
+9. 初始化剩下的**非lazy bean**
+10. 完成刷新，实现**SmartLifecycle**接口的bean开始启动，随后发布**ContextRefreshedEvent**事件
+
+## 8. spring使用的设计模式举例
 
 - 单例模式：任何bean默认就是单例的
 - 工厂模式：FactoryBean

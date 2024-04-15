@@ -147,7 +147,17 @@ ConcurrentHashMap的数据结构和HashMap差不多，也是数组+链表实现�
 - 数组还没初始化，开始数组的初始化
 - 数组的bucket还未被占用，CAS占用（成功了就break，失败了就代表已经被其他节点占用了，进行下一次循环进入其他if分支）
 - 有线程正在进行扩容操作，则先帮助扩容
-- bucket被暂用，锁住根节点，开始构造到链表的为尾节点。添加到尾节点后，在判断当前链表长度是否超过8，否则就转换为红黑树
+- bucket被占用，锁住根节点，开始构造到链表的为尾节点。添加到尾节点后，在判断当前链表长度是否超过8，否则就转换为红黑树
+
+## 3.2 为什么key和value不允许为null，而HashMap可以呢？
+
+> **ConcurrentHashMap如果允许key和value为null，会产生二义性**。即不能确定map里本身没有这个数据，还是说有这个数据，但这个数据存的是null值。
+>
+> 为什么HashMap可以允许呢？因为它不会产生二义性，使用**HashMap默认就是单线程下，假设我们获取key为A的数据返回了null，之后还马上可以通过containsKey来判断到底是不存在A还是A就为null（因为是单线程，不用担心其他线程会修改数据）**
+>
+> 但ConcurrentHashMap是线程安全的，也就是默认会在多线程下修改数据。假设ConcurrentHashMap支持设置null，这时线程A获取key为null的数据返回了null，此时我们不确定A在不在ConcurrentHashMap里，需要用containsKey来判断key为null是否存在于ConcurrentHashMap里。但多线程的情况下，B线程在A线程containsKey操作前添加了key为null的数据，导致A线程containsKey返回了true，导致和第一步预期不同（第一步可能是不存在key为null的数据）
+>
+> 综上：**ConcurrentHashMap，它是为并发而生的，它是要用在并发场景中的，当我们 map.get(key)返回 null 的时候，是没办法通过 map.containsKey来准确的检测，因为在检测过程中可能会被其他线程锁修改，而导致检测结果并不可靠。**
 
 # 4. LockSupport
 
@@ -176,7 +186,7 @@ public static void park(Object blocker) {
 }
 
 /**
- * 定时等待，阻塞当前线程指定的纳秒数，当时间到达时就自动唤醒
+ * 定时等待，阻塞当前线程指定的纳秒数，当时间到达时就自动唤醒（定时任务会调用）
  */
 public static void parkNanos(long nanos) {
     if (nanos > 0)
@@ -184,7 +194,7 @@ public static void parkNanos(long nanos) {
 }
 
 /**
- * 定时等待，阻塞当前线程直到指定的时间戳（deadline）到来就自动唤醒
+ * 定时等待，阻塞当前线程直到指定的时间戳（deadline）到来就自动唤醒（定时任务会调用）
  */
 public static void parkUntil(long deadline) {
     UNSAFE.park(true, deadline);
@@ -380,7 +390,7 @@ lock（加锁过程）：
 - java.util.concurrent.locks.ReentrantLock.Sync#nonfairTryAcquire：利用CAS尝试设置state，能设置成功，代表获取到锁，成功返回。设置失败，代表已经被其他线程获取了锁，返回失败
 - 返回失败后：
   - 将当前线程构造为Node节点，设置到同步队列的链表中
-  - 进入到**java.util.concurrent.locks.AbstractQueuedSynchronizer#acquireQueued**方法：死循环获取当前Node的前一个节点（**同步队列的首节点时成功获取到锁的节点**），如果前驱结点为首节点，当前Node才有资格获取锁。如果还是获取不到，就调用**java.util.concurrent.locks.LockSupport#park**(java.lang.Object)方法阻塞当前线程，等待其他线程唤醒再去竞争锁
+  - 进入到**java.util.concurrent.locks.AbstractQueuedSynchronizer#acquireQueued**方法：死循环获取当前Node的前一个节点（**同步队列的首节点是成功获取到锁的节点**），如果前驱结点为首节点，当前Node才有资格获取锁。如果还是获取不到，就调用**java.util.concurrent.locks.LockSupport#park**(java.lang.Object)方法阻塞当前线程，等待其他线程唤醒再去竞争锁
 
 unlock（释放锁）：
 
@@ -446,7 +456,7 @@ unlock（释放锁）：和非公平锁一样
 
 ​	根据上面的分析，**公平锁在获取锁是总是会先判断当前线程是否是等待最久的线程**。**所以，就算是同步队列存在大量Node，且有线程第一次在获取锁，那么，下一次获取到锁的线程也一定是同步队列的首节点的下一个节点（首节点就是当前获取到锁的节点，只有获取成功了，同步才会更新首节点）**
 
-​	而**非公平锁对于已经进入同步队列的线程来说，肯定也只会首节点的下一个线程能获取锁，但对于还未构造成Node加入到同步队列的线程来说，这个线程和首节点的下一个节点里的线程能竞争获取锁**，所以非公平。**但对于已经进入同步队列的线程来说，前驱结点是一定比后面的节点先获取到锁的**
+​	**非公平锁中：对于已经进入同步队列的线程来说，也只能首节点的下一个节点里的线程能尝试获取锁。但对于还未构造成Node加入到同步队列的线程来说，这个线程和首节点的下一个节点里的线程能竞争获取锁**，所以非公平。**但对于已经进入同步队列的线程来说，前驱结点是一定比后面的节点先获取到锁的**
 
 ### 6.3.2 **各自优势**
 
@@ -514,7 +524,7 @@ private transient Node lastWaiter;
 
 Condition的实现是用了**等待队列（但数据结构还是AQS里的Node，将Node#waitStatus设为2就表示这是等待节点）**
 
-只有获取到锁的线程才能调用Condition的阻塞和唤醒方法
+**只有获取到锁的线程才能调用Condition的阻塞和唤醒方法**
 
 ## 9.1 Condition#await
 
@@ -577,7 +587,7 @@ signal主要就是将等待队列的首节点转移到同步队列的为节点�
 
 ## 9.3 总结
 
-Condition实现了等待通知，当一个线程进入同步块后，就可以调用await，释放自己获取的锁资源，将自己阻塞。内部实现是首先释放锁资源，再将当前线程构造成一个等待节点，加入ConditionObject的等待队列的末尾。而当其他进入同步块的线程调用signal后，会将等待队列的首节点转移到同步队列，并将其变成同步节点，最后再使用同步队列的唤醒机制等待被唤醒。
+Condition实现了等待通知，当一个线程进入同步块后，就可以调用await，释放自己获取的锁资源，将自己阻塞。内部实现是**首先将当前线程构造成一个等待节点，加入ConditionObject的等待队列的末尾，再释放锁资源，之后唤醒同步队列的第二个节点让其尝试获取锁**。而当其他进入同步块的线程调用signal后，会将等待队列的首节点转移到同步队列，并将其变成同步节点，最后再使用同步队列的唤醒机制等待被唤醒。
 
 ​	所以signal并不能直接唤醒一个await的线程，最佳使用案例就是消费者发送者机制，比如阻塞队列。
 
@@ -639,7 +649,7 @@ private final ReentrantLock mainLock = new ReentrantLock();
 private final HashSet<Worker> workers = new HashSet<Worker>();
 
 private final Condition termination = mainLock.newCondition();
-// 池已经创建的线程最大数（一个动态值）
+// 池已经创建的线程最大数（一个动态值，线程池整个周期同时存在的最多线程数）
 private int largestPoolSize;
 // 完成的任务数
 private long completedTaskCount;
@@ -663,9 +673,9 @@ private volatile int maximumPoolSize;
 
 ## 11.2 核心方法
 
-- shutdown：将当前线程池状态设为SHUTDOWN状态，在中断空闲的Worker（判断Worker是否空闲就通过它的锁方法）。**所以，执行了这个方法后，正在执行的任务不会被中断，且已经存在workQueue中的Runnable也可以被执行，但是不能放入新的Runnable**
+- shutdown：将当前线程池状态设为SHUTDOWN状态，再中断空闲的Worker（判断Worker是否空闲就通过它的锁方法）。**所以，执行了这个方法后，正在执行的任务不会被中断，且已经存在workQueue中的Runnable也可以被执行，但是不能放入新的Runnable**
 
-- shutdownNow：将当前线程池状态设为STOP状态，将所有Worker设置为中断位，且倒出workQueue中的所有Runnable。**所以，执行了这个方法后，正在允许的任务如果检测了中断位就会立即退出，如果没检测就还是会执行完，而已经存在workQueue中的Runnable将不会被执行，会将这些Runnable返回给调用者，让调用者处理**
+- shutdownNow：将当前线程池状态设为STOP状态，将所有Worker设置为中断位，且倒出workQueue中的所有Runnable。**所以，执行了这个方法后，正在运行的任务如果检测了中断位就会立即退出，如果没检测就还是会执行完，而已经存在workQueue中的Runnable将不会被执行，会将这些Runnable返回给调用者，让调用者处理**
 
 ​		ThredPoolExecutor除了核心方法外，还提供了很多辅助方法。比如setCorePoolSize方法之类的set方法，是支持动态修改参数的。而prestart相关方法都支持预启动核心线程等
 
@@ -968,8 +978,8 @@ public <V> ScheduledFuture<V> schedule(Callable<V> callable,
 /**
  * 基于固定的频率执行定时任务 
  * 例：初始执行任务的时间戳：当前时间戳（调用时）+ initialDelay 
- * 第二次执行：初始执行任务的时间戳 + period 
- * 第三次执行：第二次执行任务的时间戳 + period
+ * 第二次执行：初始执行任务开始时的时间戳 + period 
+ * 第三次执行：第二次执行任务开始时的时间戳 + period
  */
 public ScheduledFuture<?> scheduleAtFixedRate(Runnable command,
                                               long initialDelay,
@@ -987,6 +997,8 @@ public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command,
                                                  long delay,
                                                  TimeUnit unit);
 ```
+
+**所以，fixedRate的每次执行的开始时间是可以计算的。但fixedDelay却不行，因为它还受任务本身执行花费的时间所影响**。
 
 ## 13.2 DelayedWorkQueue
 

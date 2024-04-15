@@ -52,7 +52,7 @@ public class ThreadLocalDemo {
 
 ​																2.ThreadLocal只被弱引用持有，gc后被回收了
 
-如上面的代码，当构造一个A对象时，内部的local对象也构造了，之后调用get和set方法堆local对象取值和设置值，当A对象不可达时，垃圾收集器就会回收A。
+如上面的代码，当构造一个A对象时，内部的local对象也构造了，之后调用get和set方法对local对象取值和设置值，当A对象不可达时，垃圾收集器就会回收A。
 
 现在我们假设ThreadLocalMap的Entey里的key（ThreadLocal对象）不是弱引用的，且已经调用了A的对象的get或set方法，那么垃圾收集器回收A对象时，一定不会回收里面的local对象，为什么？
 

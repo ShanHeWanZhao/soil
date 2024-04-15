@@ -1,11 +1,11 @@
-# Redisson(3.11.5)
+# Redisson(3.16.8)
 
-## 1 分布式互斥锁（RedissonLock）
+## 1 RLock（分布式互斥锁）
 
-互斥锁获取锁可大致分为3类，分别是：
+实现类为**RedissonLock**，互斥锁获取锁可大致分为3类，分别是：
 
 - **尝试获取锁**：最简单的一种情况，只需判断一下锁是否存在，再做对应的操作就行
-- **定时尝试获取锁**：利用redis的发布和订阅机制，收到解锁的消息后会唤醒一个阻塞的线程在尝试获取锁，而本地则使用AQS中的定时尝试。
+- **定时尝试获取锁**：利用redis的发布和订阅机制，收到解锁的消息后会唤醒一个阻塞的线程再尝试获取锁，而本地则使用AQS中的定时尝试。
 - **无限制的阻塞获取锁**：和上面一个很像，本质是一种定时自旋再尝试获取锁
 
 ### 1.1 tryAcquireOnceAsync
@@ -39,7 +39,7 @@ return redis.call('pttl', KEYS[1]); -- 锁存在，返回过期时间
 
 ​	如果不存在，就代表是第一次加锁，构造一个hash结构的key，key为我们指定的锁名。key中只有一对Dict，Dict的key为（客户端id:线程id），根据这个Dict里的key我们可以唯一确定某台客户端的某个线程，value就设为1就行，设为数字好自增用来支持重入。
 
-​	如果存在，就代表不是第一次加锁了，需要先判断是否是当前客户端的当前线程获取到了锁，如果是就代表是所冲入，让Dict的value + 1就行（所以后续解锁是要 -1，重入多少次，就要解锁多少次）。如果不是当前线程获取得锁，就表示有锁冲突，返回锁得过期时间，交给客户端处理
+​	如果存在，就代表不是第一次加锁了，需要先判断是否是当前客户端的当前线程获取到了锁，如果是就代表是锁重入，让Dict的value + 1就行（所以后续解锁是要 -1，重入多少次，就要解锁多少次）。如果不是当前线程获取得锁，就表示有锁冲突，返回锁得过期时间，交给客户端处理
 
 ​	所以，返回null就代表获取锁成功，返回数字就表示获取锁失败，显示的是剩余锁的有效时间（这个值参考性不强，因为在获取锁的线程执行过程子，还会不断的重置过期时间，以免锁过期）
 
@@ -272,20 +272,38 @@ future.onComplete((opStatus, e) -> {
 });
 ```
 
-## 2 分布式共享锁之信号量（RedissonSemaphore）
+## 2 RSemaphore（分布式共享锁之信号量）
 
-​		主要实现思想就是在redis存一个**string类型的key，key名为信号量名，value为一个数字，代表可获取的信号量值**。这里不像RedissonLock用hash结构来存是因为这是共享锁，根本不需要考虑哪个线程获取了量值（permits），就算是重入，也把线程像第一次获取量值时对待就行。**value的值就代表可获取的量值，代表了在分布式的多节点下最多允许同时运行同步块代码的线程数**（毕竟如果一个线程一次获取了2个量值，就达不到value各线程同时运行了）
+​		实现类为**RedissonSemaphore**，主要实现思想就是**在redis存一个string类型的key，key名为信号量名，value为一个数字，代表可获取的信号量值，并利用jdk的Semaphore和redis的pub/sub机制实现线程的阻塞和唤醒**。
 
-## 3 RedLock
+​		这里不像RedissonLock用hash结构来存是因为这是共享锁，根本不需要考虑哪个线程获取了量值（permits），就算是重入，也把线程像第一次获取量值时对待就行。**value的值就代表可获取的量值，代表了在分布式的多节点下最多允许同时运行同步块代码的线程数**（毕竟如果一个线程一次获取了2个量值，就达不到value各线程同时运行了）
 
-​		本质是基于在多个redis服务端的具有相同key的互斥锁实现。使用方式就是对每个redis服务端都构造相同key的RedissonLock，将这些RedissonLock封装到RedissonRedLock里，在尝试对RedissonRedLock进行加锁解锁操作
+​		使用时需要先**org.redisson.api.RSemaphore#trySetPermits方法来设置premit的个数**，其余方法就和jdk的Semaphore一致
+
+## 3 RCountDownLatch（分布式共享锁之门闩）
+
+​		实现类为RedissonCountDownLatch，和RSemaphore类似都用redis的string保存信息，再**利用jdk的AQS和redis的pub/sub机制实现线程的阻塞和唤醒**。在使用前需要org.redisson.api.RCountDownLatchAsync#trySetCountAsync方法来设置计数值，且RCountDownLatch支持重复使用
+
+## 4 RedLock
+
+### 4.1 **为什么会存在红锁？**
+
+>  		Redis集群模式下，对master节点保存锁信息成功，但同步到从节点redis服务器是一个异步过程，在同步过程中，如果master节点宕机导致同步失败，这个从节点晋升为master节点就会导致锁丢失，如果此时还有对这个锁进行上锁的线程也会上锁成功，分布式互斥锁就失效了。
+>	
+>  		所以，存在红锁就是为了防止以上情况出现。就算加锁成功后宕机一个分锁的master节点导致这个分锁的所信息丢失，也会有红锁的规则束缚（超过半数加锁成功才算成功）着让其他线程不会加锁成功。由此也可以推断，分锁数量越多，能容忍宕机的分锁master节点也就越多，锁也更可靠，但同时也会消耗更多的资源		
+
+### 4.2 红锁如果实现
+
+​		基于在多个redis服务端的具有相同key的互斥锁实现。使用方式就是对每个redis服务端都构造相同key的RedissonLock，将这些RedissonLock封装到RedissonRedLock里，在尝试对RedissonRedLock进行加锁解锁操作
 
 ​	解释下分锁和总锁，会用在下面的代码注释里
 
 - 分锁：每个RedissonLock（互斥锁）
 - 总锁：总体的RedissonRedLock
 
-### 3.1 tryLock
+核心代码如下
+
+#### 4.2.1 tryLock
 
 ​		依次尝试对每个分锁加锁，如果分锁成功总数超过((分锁个数 / 2) + 1)个的话，就代表总锁加锁成功，每个分锁在操作完毕后（不论是枷锁成功还是失败），都需要重新计算剩余可用的等待时间，以免总体超时。
 
@@ -387,9 +405,7 @@ RedLock的加锁本质就是实现分布式锁的高可用，就算某台redis�
     }
 ```
 
-
-
-### 3.2 unlock
+#### 4.2.2 unlock
 
 ​		依次对每个分锁尝试解锁，就算解锁失败（分锁如果根本就没获取到锁，会出现IllegalMonitorStateException异常）也不会抛出异常。所以，放心解锁，最好就算总锁没获取成功，也操作unlock，比如程序中出现什么Error问题，导致获取成功的分锁没解锁就抛了出去，导致这几十秒时间这个redis节点不能加锁成功
 
@@ -409,3 +425,210 @@ protected void unlockInner(Collection<RLock> locks) {
     }
 }
 ```
+
+## 5 redisoon对分布式锁的优化（RLock添加了WAIT命令代替红锁）
+
+### 5.1 为什么不推荐使用红锁？
+
+> ​		红锁的实现方式就限制了加锁时需要使用多个完全独立的redis服务器。但现在大多数都是redis集群，redis集群模式要使用红锁必须设置不同的key，保证这些不同的key通过 CRC16 计算后分布在不同的槽，从而保存在不同的redis分片中，才能实现相互独立。这样既要多消耗服务器的资源，也需要开发小心设置key。且redisson对普通分布式锁也有如下优化，所以redis集群比较稳定就是用普通分布式锁就行
+
+### 5.2 RLock + WAIT命令
+
+命令格式：WAIT numreplicas(同步成功的从节点数目)  timeout(超时时间)
+
+>  	**Redis的WAIT 命令用来阻塞当前客户端，直到所有先前的写入命令成功传输并且至少由指定数量的从节点复制完成**。 如果执行超过超时时间(以毫秒为单位)，则即使尚未完成指定数量的从结点复制，该命令也会返回。 WAIT 命令总是**返回在WAIT 命令之前发送的写入命令被复制到的从结点数量**
+
+核心代码如下（**org.redisson.RedissonBaseLock#evalWriteAsync**方法）
+
+```java
+protected <T> RFuture<T> evalWriteAsync(String key, Codec codec, RedisCommand<T> evalCommandType, String script, List<Object> keys, Object... params) {
+    MasterSlaveEntry entry = commandExecutor.getConnectionManager().getEntry(getRawName());
+    // 执行当前命令的master节点的从节点数量
+    int availableSlaves = entry.getAvailableSlaves();
+
+    // 创建批量命令执行器（会添加WAIT命令，等待数据同步到从节点。但使用了批量命令执行器，就用不了script cache了）
+    CommandBatchService executorService = createCommandBatchService(availableSlaves);
+    // 这里并不会直接执行命令，而是将命令保存起来，等待后续添加其他命令（比如WAIT）后再一起执行
+    RFuture<T> result = executorService.evalWriteAsync(key, codec, evalCommandType, script, keys, params);
+    if (commandExecutor instanceof CommandBatchService) {
+        return result;
+    }
+    // 真正的执行：根据配置再适当添加命令，然后一起执行（WAIT命令就会在这里面添加）
+    RFuture<BatchResult<?>> future = executorService.executeAsync();
+
+    // 设置一个等待这个future完成（正常结束或异常结束）的listener，用来判断redis实际同步的从节点数量是否是我们指定的从节点数量，并抛出异常（感觉这种实现方式不好，所以最新的版本已经让用户来选择是否抛异常了）
+    CompletionStage<T> f = future.handle((res, ex) -> {
+        if (ex == null && res.getSyncedSlaves() != availableSlaves) {
+            throw new CompletionException(new IllegalStateException("Only "
+                                                    + res.getSyncedSlaves() + " of " + availableSlaves + " slaves were synced"));
+        }
+
+        return result.getNow();
+    });
+    return new CompletableFutureWrapper<>(f);
+}
+```
+
+> ​		redisson在执行这些加锁命令时，会构建一个批量命令执行器（CommandBatchService），然后内部再添加了一些优化命令（如WAIT命令）后再一起执行这些命令。
+>
+> ​		所以，redisson添加普通锁的时候默认在lua脚本执行后再执行了WAIT命令（前提是当前redis节点要有从节点），等待锁信息相关数据同步到从节点后再返回，这样锁信息主从同步时就基本不会丢失
+
+## 6 redisson提供的工具类
+
+### 6.1 RLocalCachedMap（分布式本地缓存工具）
+
+​		**本地缓存和redis缓存同时存在的Map，牺牲客户端内存的方式，换取在频繁获取某些常用数据时消耗在网络上的时间。非常适合适合分布式多节点场景下读取频繁，更新不频繁的缓存数据**
+
+ 		主要是基于redis的pub/sub功能实现RLocalCachedMap里数据添加、更新、删除等写数据操作时对其他节点的同等写操作，主要实现类为**RedissonLocalCachedMap**，重点字段和方法分析
+
+```java
+/**
+* 当前缓存实例的id，用来做过滤操作（比如是当前节点中的缓存实例更新的数据，那么当前实例就可以对pub/sub的更新消息不做任何操作）
+*/
+private byte[] instanceId;
+/**
+ * 本地缓存，提供了三方的caffeine缓存和redisson内部自己设计的缓存<p/>
+ * 默认用redisson自己设计的缓存：{@link org.redisson.api.LocalCachedMapOptions.EvictionPolicy}
+ */
+private ConcurrentMap<CacheKey, CacheValue> cache;
+private int invalidateEntryOnChange;
+/**
+ * 同步策略，默认 {@link SyncStrategy#INVALIDATE}
+ */
+private SyncStrategy syncStrategy;
+/**
+ * 存储模式<p/>
+ * 默认{@link org.redisson.api.LocalCachedMapOptions.StoreMode#LOCALCACHE_REDIS}
+ */
+private LocalCachedMapOptions.StoreMode storeMode;
+/**
+ * 当map中key对应的value为null时，是否储存在本地 <p/>
+ * 默认为false，代表value为null就不储存再本地缓存中
+ */
+private boolean storeCacheMiss;
+
+/**
+ * 基于redis的pub/sub实现的监听器，处理缓存的禁用，启用，删除和更新操作
+ */
+private LocalCacheListener listener;
+/**
+ * 本地缓存的视图工具，主要生成cacheKey和遍历本地缓存的
+ */
+private LocalCacheView<K, V> localCacheView;
+
+// put方法
+@Override
+protected RFuture<V> putOperationAsync(K key, V value) {
+    ByteBuf mapKey = encodeMapKey(key);
+    CacheKey cacheKey = localCacheView.toCacheKey(mapKey);
+    // 先放到本地缓存
+    CacheValue prevValue = cachePut(cacheKey, key, value);
+    broadcastLocalCacheStore(value, mapKey, cacheKey);
+
+    if (storeMode == LocalCachedMapOptions.StoreMode.LOCALCACHE) {
+        V val = null;
+        if (prevValue != null) {
+            val = (V) prevValue.getValue();
+        }
+        return RedissonPromise.newSucceededFuture(val);
+    }
+
+    ByteBuf mapValue = encodeMapValue(value);
+    byte[] entryId = generateLogEntryId(cacheKey.getKeyHash());
+    ByteBuf msg = createSyncMessage(mapKey, mapValue, cacheKey);
+    // 更新redis端hash数据结构里的缓存数据，并publish消息
+    return commandExecutor.evalWriteAsync(getRawName(), codec, RedisCommands.EVAL_MAP_VALUE,
+                                          "local v = redis.call('hget', KEYS[1], ARGV[1]); "
+                                          + "redis.call('hset', KEYS[1], ARGV[1], ARGV[2]); "
+                                          + "if ARGV[4] == '1' then "
+                                          + "redis.call('publish', KEYS[2], ARGV[3]); "
+                                          + "end;"
+                                          + "if ARGV[4] == '2' then "
+                                          + "redis.call('zadd', KEYS[3], ARGV[5], ARGV[6]);"
+                                          + "redis.call('publish', KEYS[2], ARGV[3]); "
+                                          + "end;"
+                                          + "return v; ",
+                                          Arrays.<Object>asList(getRawName(), listener.getInvalidationTopicName(),listener.getUpdatesLogName()),
+                                          mapKey, mapValue, msg, invalidateEntryOnChange, System.currentTimeMillis(), entryId);
+}
+/**
+* 根据参数构建消息，并publish到对应的topic中，让订阅这个topic的客户端来处理缓存更新操作
+*/
+private void broadcastLocalCacheStore(V value, ByteBuf mapKey, CacheKey cacheKey) {
+    if (storeMode != LocalCachedMapOptions.StoreMode.LOCALCACHE) {
+        return;
+    }
+
+    if (invalidateEntryOnChange != 0) {
+        Object msg;
+        if (syncStrategy == SyncStrategy.UPDATE) { // 缓存更新消息
+            ByteBuf mapValue = encodeMapValue(value);
+            msg = new LocalCachedMapUpdate(instanceId, mapKey, mapValue);
+        } else { // 缓存失效消息
+            msg = new LocalCachedMapInvalidate(instanceId, cacheKey.getKeyHash());
+        }
+        // publish消息
+        listener.getInvalidationTopic().publishAsync(msg);
+    }
+    mapKey.release();
+}
+// get方法
+public RFuture<V> getAsync(Object key) {
+    checkKey(key);
+
+    // 先从本地缓存中拿
+    CacheKey cacheKey = localCacheView.toCacheKey(key);
+    CacheValue cacheValue = cache.get(cacheKey);
+    if (cacheValue != null && (storeCacheMiss || cacheValue.getValue() != null)) {
+        return RedissonPromise.newSucceededFuture((V) cacheValue.getValue());
+    }
+
+    if (storeMode == LocalCachedMapOptions.StoreMode.LOCALCACHE) { // 当前缓存模式仅为本地缓存
+        if (hasNoLoader()) { // 直接返回空
+            return RedissonPromise.newSucceededFuture(null);
+        }
+
+        CompletableFuture<V> future = loadValue((K) key, false);
+        CompletableFuture<V> f = future.thenApply(value -> {
+            if (storeCacheMiss || value != null) {
+                cachePut(cacheKey, key, value);
+            }
+            return value;
+        });
+        return new CompletableFutureWrapper<>(f);
+    }
+
+    RPromise<V> result = new RedissonPromise<>();
+    // 从redis中从redis中获取
+    RFuture<V> future = super.getAsync((K) key);
+    future.onComplete((value, e) -> {
+        if (e != null) {
+            result.tryFailure(e);
+            return;
+        }
+        // 放入本地缓存中
+        if (storeCacheMiss || value != null) {
+            cachePut(cacheKey, key, value);
+        }
+        result.trySuccess(value);
+    });
+    return result;
+}
+```
+
+### 6.2 redis基本数据类型映射
+
+- RBucket -- string
+
+- RMap -- hash
+
+- RList  -- list
+
+- RSet  -- set
+
+- RScoredSortedSet  -- sorted set
+
+
+
+
+​		使用RedissonClient获取这些API都提供了Codec参数，且Redisson提供了很多默认的Codec（TypedJsonJacksonCodec、MarshallingCodec(默认)、SerializationCodec、FstCodec等），方便且提供了多种序列化方式
