@@ -1,8 +1,8 @@
-# Seata的AT模式分析(1.5.0版本)
+# Seata(1.7.1版本)
 
 ## 1 增强机制
 
-SeataAutoConfiguration中的GlobalTransactionScanner，主要用来代理@GlobalTransactional注解和客户端RM和TM的注册
+SeataAutoConfiguration中的GlobalTransactionScanner，主要用来代理@GlobalTransactional注解和客户端RM和TM的注册，同时代理TCC的bean
 
 ### 1.1 GlobalTransactionScanner的实例化
 
@@ -56,10 +56,16 @@ SeataAutoConfiguration中的GlobalTransactionScanner，主要用来代理@Global
 
 ### 1.2 相关表
 
-- **undo_log**：客户端的表，保存修改数据sql操作前后镜像值，主要用于全局事务回滚来构造回滚sql以回滚数据
+- **undo_log**：客户端的表，保存修改数据sql操作前后镜像值，主要用于全局事务回滚来构造回滚sql以回滚数据（
 - **global_session**：服务端表，每一条记录都代表一个全局事务
 - **branch_session**：服务端表，每一条记录都代表一个从客户端注册的分支事务
 - **lock_table**：服务端表，客户端在全局事务期间修改的数据，每一条记录了某个数据库每个表的具体某个行的主键值，用在多个全局事务期间解决写冲突。
+- **tcc_fence_log**：客户端表。用来解决TCC阶段可能出现的空回滚、悬挂和幂等判断等操作，维持TCC的健壮性（且只有**@TwoPhaseBusinessAction的useTCCFence为true才会使用**）
+
+- AT使用的表：**undo_log**、**global_session**、**branch_session**、**lock_table**
+- TCC使用的表：**tcc_fence_log**、**global_session**、**branch_session**
+
+
 
 ## 2 重要术语
 
@@ -67,7 +73,7 @@ SeataAutoConfiguration中的GlobalTransactionScanner，主要用来代理@Global
 
 ​		资源管理器，管理分支事务处理的资源，与TC交谈以注册分支事务和报告分支事务的状态，并驱动分支事务提交或回滚。
 
-​		**作用在seata客户端，代码实现中和DatsSource的代理绑定，负责和数据库相关的操作打交道，默认实现为DefaultResourceManager（仅是一个适配器，针对不同的模式适配了不同的ResourceManager实现。比如AT模式的默认实现是DataSourceManager）**。在Connection的commit中，负责向server端注册当前分支事务；在Connection的rollback中，负责向server端报告当前分支事务的错误状态。同时也处理服务端发送过来的分支事务commit（删除undo_log）或rollback（生成补偿sql并执行）操作。
+​		**作用在seata客户端，代码实现中和DatsSource的代理绑定，负责和数据库相关的操作打交道，默认实现为DefaultResourceManager（仅是一个适配器，针对不同的模式适配了不同的ResourceManager实现。比如AT模式的默认实现是DataSourceManager，TCC模式的实现是TCCResourceManager）**。在Connection的commit中，负责向server端注册当前分支事务；在Connection的rollback中，负责向server端报告当前分支事务的错误状态。同时也处理服务端发送过来的分支事务commit（AT为删除undo_log，TCC为触发confirm操作）或rollback（AT为生成补偿sql并执行，TCC为触发cancel操作）操作。
 
 ### 2.2 TM（Transaction Manager）
 
@@ -111,7 +117,7 @@ SeataAutoConfiguration中的GlobalTransactionScanner，主要用来代理@Global
 
 分支事务：分布式事务中整个链路里每个服务单独的事务，不可能跨服务存在。运行在spring事务的支持下，一个本地事务就是一个分支事务。没有被本地事务支持但运行在全局事务下，则一个dml sql就会生成一个分支事务
 
-## 三、服务端初始化
+## 3、服务端初始化
 
 服务端就是一个springboot项目，启动类是**ServerApplication，核心启动方法是io.seata.server.Server#start**
 
@@ -151,14 +157,14 @@ public static void start(String[] args) {
 }
 ```
 
-## 四、客户端初始化
+## 3、客户端初始化
 
 ​		客户端初始化主要是通过两个自动代理bean来实现的
 
 - **GlobalTransactionScanner**：代理**@GlobalTransactional和@GlobalLock注解标志的类或方法，统一使用GlobalTransactionalInterceptor进行拦截**
 - **SeataAutoDataSourceProxyCreator**：代理DataSource类。**原来执行sql的流程 DataSource -> Connection -> Statement -> 开始执行sql，变为了DataSourceProxy -> ConnectionProxy -> StatementProxy**（**DataSourceProxy里代理commit相关操作，和server通信。StatementProxy则代理执行sql的逻辑，处理执行前后镜像数据并生成undo数据，以便后续的rollback操作**）
 
-## 五、一个完整的全局事务流程（db模式）
+## 5、一个完整的全局事务流程（db模式）
 
 ### 5.1 @GlobalTransactional注解拦截 
 
@@ -272,7 +278,7 @@ public static void start(String[] args) {
 
 至此，全局事务的流程已全部结束
 
-## 六、全局事务锁冲突和重试的实现
+## 6、全局事务锁冲突和重试的实现
 
 ### 6.1 写隔离和锁重试的实现
 
@@ -431,7 +437,115 @@ public T doExecute(Object... args) throws Throwable {
 }
 ```
 
+# 8 TCC模式
 
+​		可以简单理解**AT模式为一种特殊的TCC模式。AT和TCC共用TM和TC，但AT模式的RM为DataSourceManager，这部分完全由seata实现，以帮助我们资源的commit和rollback。TCC模式的RM为TCCResourceManager，需要我们自己实现一部分代码**。
+
+​		TCC模式也有分支事务和全局事务，且同样基于代理实现。**TCC的拦截为TccActionInterceptor，用来在try阶段注册当前分支事务**。全局事务的操作和AT一致（begin,commit,rollback），都依赖@GlobalTransactional注解的代理实现。
+
+​		TCC全称为**try-confirm-cancel**。和AT不同的是业务入侵大，需要我们写预留资源和回滚相关的代码。将TCC和AT做类比看，TCC的预留资源即AT中undo_log的解析和保存（但TCC中的预留资源我们不需要这么复杂，往往只用增加一个字段来记录被操作数据的修改空间即可），回滚即AT中undo_log的回滚。
+
+- try：**@TwoParseBusinessAction注解**的方法，用来运行业务代码，并且**预留业务资源**
+- confirm：commit操作，并**释放我们try阶段预留的业务资源**
+- cancel：rollback操作，将**try阶段预留的资源进行回滚操作**
+
+### 8.1 TCC可能出现的问题和Seata如何解决？
+
+依赖tcc_fence_log表，实现在TCCFenceHandler类里
+
+```sql
+CREATE TABLE IF NOT EXISTS `tcc_fence_log`
+(
+    `xid`           VARCHAR(128)  NOT NULL COMMENT 'global id',    
+    `branch_id`     BIGINT        NOT NULL COMMENT 'branch id',    
+    `action_name`   VARCHAR(64)   NOT NULL COMMENT 'action name',    
+    `status`        TINYINT       NOT NULL COMMENT 'status(tried:1;committed:2;rollbacked:3;suspended:4)',    
+    `gmt_create`    DATETIME(3)   NOT NULL COMMENT 'create time',    
+    `gmt_modified`  DATETIME(3)   NOT NULL COMMENT 'update time',    
+    PRIMARY KEY (`xid`, `branch_id`),    
+    KEY `idx_gmt_modified` (`gmt_modified`),    
+    KEY `idx_status` (`status`)
+) ENGINE = InnoDB
+DEFAULT CHARSET = utf8mb4;
+```
+
+#### 8.1.1 幂等保证
+
+**出现场景**：TC端向分支事务发起commit操作，且分支事务commit成功。但因网络相关原因TC端没有接收到分支事务的commit响应，导致重试
+
+**如何解决**：分支事务commit时判断tcc_fence_log#status的状态，如果为committed则已经提交了，直接返回ture即可，不再执行confirm操作
+
+```java
+// TCCFenceHandler的commitFence方法，这里只保留了幂等校验
+public static boolean commitFence(Method commitMethod, Object targetTCCBean,
+                                  String xid, Long branchId, Object[] args) {
+    // 在一个事务里进行幂等相关操作校验和业务的commit方法执行
+    return transactionTemplate.execute(status -> {
+        try {
+            Connection conn = DataSourceUtils.getConnection(dataSource);
+            TCCFenceDO tccFenceDO = TCC_FENCE_DAO.queryTCCFenceDO(conn, xid, branchId);
+            // 幂等校验：造成的原因可能时TC因网络没有收到分支事务commit的响应结果，导致TC进行重试，而分支事务实际已经commit了
+            if (TCCFenceConstant.STATUS_COMMITTED == tccFenceDO.getStatus()) { 
+                // tcc_fence_log状态为已提交，说明已操作了全局commit，直接返回true，就不用执行业务commit代码，用来保证幂等
+                LOGGER.info("Branch transaction has already committed before. idempotency rejected. xid: {}, branchId: {}, status: {}", xid, branchId, tccFenceDO.getStatus());
+                return true;
+            }
+            // tcc_fence_log状态更新为committed，在执行业务commit方法
+            return updateStatusAndInvokeTargetMethod(conn, commitMethod, targetTCCBean, xid, branchId, TCCFenceConstant.STATUS_COMMITTED, status, args);
+        } catch (Throwable t) {
+            status.setRollbackOnly();
+            throw new SkipCallbackWrapperException(t);
+        }
+    });
+}
+```
+
+#### 8.1.2 空回滚
+
+**出现场景**：try阶段出现异常，全局事务操作分支事务进行回滚，分支事务执行了cancel阶段
+
+**如何解决**：分支事务rollback时，判断如果没有tcc_fence_log记录，则不再执行cancel阶段
+
+````java
+// TCCFenceHandler的rollbackFence方法，这里只保留空回滚处理相关
+public static boolean rollbackFence(Method rollbackMethod, Object targetTCCBean,
+                                        String xid, Long branchId, Object[] args, String actionName) {
+        // 在一个事务里进行幂等相关操作校验和业务的rollback方法执行
+        return transactionTemplate.execute(status -> {
+            try {
+                Connection conn = DataSourceUtils.getConnection(dataSource);
+                TCCFenceDO tccFenceDO = TCC_FENCE_DAO.queryTCCFenceDO(conn, xid, branchId);
+                // non_rollback
+                // 出现空回滚：可能是TCC中的try阶段执行出现了异常，就没有保存tcc_fence_log记录。此时全局事务需要操作rollback
+                if (tccFenceDO == null) {
+                    // 避免悬挂问题
+                    // 还是要插入一条状态为SUSPENDED的tcc_fence_log记录，这样就算TCC中的cancel先于try执行，也不用担心try会被触发
+                    boolean result = insertTCCFenceLog(conn, xid, branchId, actionName, TCCFenceConstant.STATUS_SUSPENDED);
+                    LOGGER.info("Insert tcc fence record result: {}. xid: {}, branchId: {}", result, xid, branchId);
+                    if (!result) {
+                        throw new TCCFenceException(String.format("Insert tcc fence record error, rollback fence method failed. xid= %s, branchId= %s", xid, branchId),
+                                FrameworkErrorCode.InsertRecordError);
+                    }
+                    // 返回rollback成功，不执行cancel操作
+                    return true;
+                } 
+                }
+                return updateStatusAndInvokeTargetMethod(conn, rollbackMethod, targetTCCBean, xid, branchId, TCCFenceConstant.STATUS_ROLLBACKED, status, args);
+            } catch (Throwable t) {
+                status.setRollbackOnly();
+                throw new SkipCallbackWrapperException(t);
+            }
+        });
+    }
+````
+
+#### 8.1.3 悬挂
+
+**出现场景**：RM执行try太慢，导致全局事务都发起rollback操作了，但之后又执行到了try阶段
+
+**如何解决**：try阶段就插入一条tcc_fence_log唯一记录，如果记录存在，则不再执行try代码
+
+代码在上面的空回滚中，tcc_fence_log为null，则插入了一条状态为TCCFenceConstant.STATUS_SUSPENDED的tcc_fence_log记录，表示要终止当前分支事务
 
   
 
