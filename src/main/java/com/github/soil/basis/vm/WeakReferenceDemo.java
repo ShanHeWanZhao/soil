@@ -1,6 +1,5 @@
 package com.github.soil.basis.vm;
 
-import com.sun.scenario.effect.impl.prism.PrTexture;
 
 import java.lang.ref.WeakReference;
 import java.util.concurrent.TimeUnit;
