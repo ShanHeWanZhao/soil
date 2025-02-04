@@ -6,8 +6,10 @@ import java.util.HashSet;
 import java.util.stream.Stream;
 
 /**
- * https://leetcode.cn/problems/longest-consecutive-sequence/?envType=study-plan-v2&envId=top-100-liked
- * 最长连续序列
+ * <a href="https://leetcode.cn/problems/longest-consecutive-sequence/?envType=study-plan-v2&envId=top-100-liked">
+ *     最长连续序列
+ *     </a>
+ *
  */
 public class LongestConsecutive {
 

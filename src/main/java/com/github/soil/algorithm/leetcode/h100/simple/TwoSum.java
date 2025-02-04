@@ -4,7 +4,9 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * https://leetcode.cn/problems/two-sum/description/
+ * <a href="https://leetcode.cn/problems/two-sum/description/">
+ *     两数之和
+ * </a>
  */
 public class TwoSum {
     public int[] twoSum(int[] nums, int target) {

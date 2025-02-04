@@ -3,8 +3,10 @@ package com.github.soil.algorithm.leetcode.h100.simple;
 import java.util.Arrays;
 
 /**
- * 移动0到数组末尾，且保持其他数字原相对顺序不变
- * https://leetcode.cn/problems/move-zeroes/description/?envType=study-plan-v2&envId=top-100-liked
+ *
+ * <a href="https://leetcode.cn/problems/move-zeroes/description/?envType=study-plan-v2&envId=top-100-liked">
+ *  移动0：移动0到数组末尾，且保持其他数字原相对顺序不变
+ *  </a>
  */
 public class MoveZeroes {
     // 快慢指针
