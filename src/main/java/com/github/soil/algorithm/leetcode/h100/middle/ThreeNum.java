@@ -9,54 +9,54 @@ import java.util.List;
  *     三数之和
  *   </a><><p/>
  *
- *  三维转二维。我门先定好其中一个数，那另外两个数之和就位 （0 - 第一个数），这样就类似两数之和。
- *  具体解法：先进行一个合理性校验，然后排序好后再从左到右遍历数组，索引位置为定好的第一个酥，然后只需要在其之后寻找到合适的两个数，并让这三个数之和为0即可
- *  为什么只需考虑索引之后的两个数：因为遍历是从左到右的，索引之前的数都被之前的遍历给覆盖到了
- *  此解法复杂度为 O(n的平方)，数据量过大通过不了测试
+ *  先排序，然后固定一个数，转化为「两数之和」问题。
+ *
+ *  关键点：排序 + 双指针收缩 + 去重处理
+ *
+ *  解法思路：
+ *  1. 先排序，确保有序性，便于双指针查找。
+ *  2. 遍历数组，每次固定一个数，在其右侧用双指针查找满足条件的两数。
+ *  3. 关键：去重处理，避免相同三元组重复：
+ *     - 固定数去重：跳过相同元素
+ *     - 左指针去重：跳过相同元素
+ *     - 右指针去重：跳过相同元素
+ *  时间复杂度 O(n²)。
+ *
+ *  解法不难，一定要注意去重判断，3个指针都要操作去重判断
  */
 public class ThreeNum {
     public List<List<Integer>> threeSum(int[] nums) {
-        List<List<Integer>> result = new ArrayList<>();
         if (nums == null || nums.length < 3) {
-            return result;
+            return null;
         }
+        List<List<Integer>> result = new ArrayList<>();
         Arrays.sort(nums);
-        if (nums[nums.length - 1] < 0) {
-            return result;
-        }
-        // 遍历数组
         for (int i = 0; i < nums.length; i++) {
-            if (nums[i] > 0) { // 如果这个数大于0，则其之后的数肯定都大于0，和更是大于0了，直接返回
+            if (nums[i] > 0){
                 return result;
             }
-            // 定义第2，3个数
+            if (i > 0 && nums[i] == nums[i - 1]){ // 跳过重复元素，避免相同三元组
+                continue;
+            }
             int left = i + 1;
-            int right = nums.length - 1;
-            while (left < right) {
-                int sum = nums[i] + nums[left] + nums[right];
-                if (sum == 0) { // 找到目标
-                    List<Integer> innerResult = new ArrayList();
-                    innerResult.add(nums[i]);
-                    innerResult.add(nums[left]);
-                    innerResult.add(nums[right]);
-                    if (!result.contains(innerResult)){ // 去重
-                        result.add(innerResult);
-                    }
-                    while (left < right && nums[right] == nums[right - 1]){ // 去重
-                        right--;
-                    }
-                    while (left < right && nums[left] == nums[left + 1]){ // 去重
+            int right = nums.length -  1;
+            while(left < right){
+                if (nums[i] + nums[left] + nums[right] == 0){
+                    List<Integer> ans = Arrays.asList(nums[i], nums[left], nums[right]);
+                    result.add(ans);
+                    left++;
+                    right--;
+                    while(left < right && nums[left] == nums[left - 1]){ // 跳过left端的重复元素
                         left++;
                     }
-                    // 两边都收拢，可以少一次while循环判断
-                    right--;
+                    while(right > left && nums[right] == nums[right + 1]){// 跳过right端的重复元素
+                        right--;
+                    }
+                }else if (nums[i] + nums[left] + nums[right] < 0){ // 和小于0，指针右移
                     left++;
-                }else if (sum > 0){ // 此时和大于0，需减小最大值，right向左
+                }else{// 和小于0，指针左移
                     right--;
-                }else{ // sum < 0，此时和小于0，需增加最小值，left向右
-                    left++;
                 }
-
             }
         }
         return result;
