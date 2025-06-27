@@ -1,4 +1,6 @@
+
 import java.util.*;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -23,7 +25,7 @@ class DepartmentTest {
         allDepartment.add(dep3);
         allDepartment.add(dep4);
 
-        List<Department> subDepartments = DepartmentTest.getSub(3, allDepartment);
+        List<Department> subDepartments = DepartmentTest.getSub(4, allDepartment);
         for (Department subDepartment : subDepartments) {
             System.out.println(subDepartment);
         }
@@ -38,19 +40,29 @@ class DepartmentTest {
      * @return
      */
     public static List<Department> getSub(int id, List<Department> allDepartment) {
-        Set<Department> result = new HashSet<>();
-        getSub(id, allDepartment, result);
-        return new ArrayList<>(result);
+        Map<Integer, List<Department>> allDepartmentByParent = allDepartment.stream().collect(Collectors.groupingBy(Department::getPid));
+        List<Department> result = new ArrayList<>();
+        Map<Integer, Department> idToDepartmentMap = allDepartment.stream().collect(Collectors.toMap(Department::getId, Function.identity()));
+        List<Department> departments = allDepartmentByParent.get(id);
+        departments.forEach(department -> getSub(department.getId(), idToDepartmentMap, allDepartmentByParent, result));
+        return result;
     }
 
-    public static void getSub(int id, List<Department> allDepartment, Set<Department> result) {
-        Optional<Department> currentDept = allDepartment.stream().filter(department -> department.getId() == id).findFirst();
-        currentDept.ifPresent(result::add);
-        Set<Department> childSet = allDepartment.stream().filter(department -> department.getPid() == id).collect(Collectors.toSet());
-        for (Department department : childSet) {
-            getSub(department.getId(), allDepartment, result);
+    private static void getSub(int id, Map<Integer, Department> allDepartment, Map<Integer, List<Department>> allDepartmentByParent, List<Department> result) {
+        if (allDepartment.get(id) == null) {
+            return;
+        }
+        Department department = allDepartment.get(id);
+        result.add(department);
+        List<Department> subDepartments = allDepartmentByParent.get(id);
+        if (subDepartments == null || subDepartments.isEmpty()) {
+            return;
+        }
+        for (Department subDepartment : subDepartments) {
+            getSub(subDepartment.getId(), allDepartment, allDepartmentByParent, result);
         }
     }
+
 }
 
 
