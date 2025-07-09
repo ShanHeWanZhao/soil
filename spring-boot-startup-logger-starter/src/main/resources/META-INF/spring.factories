@@ -1,0 +1,6 @@
+org.springframework.context.ApplicationListener=\
+site.shanzhao.startup.logger.config.StartupStartListener
+
+# 还是兼容下2.7.x版本以下的自动配置
+org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
+site.shanzhao.startup.logger.config.StartupLoggerAutoConfiguration
