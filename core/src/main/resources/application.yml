@@ -1,0 +1,8 @@
+spring:
+  application:
+    name: soil
+
+startup:
+  logger:
+    enabled: true
+    time-unit: ms
