@@ -21,18 +21,24 @@ public class ReverseLinkedList {
         node3.next = node4;
         node4.next = node5;
         System.out.println(node1);
-        System.out.println(reverseList(node1));
+        System.out.println(reverse(node1));
     }
-    public static ListNode reverseList(ListNode head) {
-        ListNode prevNode = null;
-        ListNode currentNode = head;
-        while (currentNode != null){
-            ListNode tmp = currentNode.next;
-            currentNode.next = prevNode;
-            prevNode = currentNode;
-            currentNode = tmp;
+
+
+    public static ListNode reverse(ListNode head) {
+        ListNode prev = null;
+        ListNode current = head;
+        while (current != null) {
+            ListNode next = current.next;
+            // 先赋值current.next，此时prev,next,current引用没变
+            current.next = prev;
+            // 依次往前推进
+            prev = current;
+            current = next;
         }
-        return prevNode;
+        return prev;
     }
+
+
 }
 

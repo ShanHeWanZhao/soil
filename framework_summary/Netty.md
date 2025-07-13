@@ -1,4 +1,4 @@
-# Netty(4.1.34.Final)
+#  Netty(4.1.34.Final)
 
 ## 1 Channel
 
@@ -29,7 +29,7 @@
 
 ​		channelRead作为业务的主要实现接口，和channelReadComplete都是当从Channel中读取数据时的顶层抽象接口（**对于SocketChannel来说，分别是读取一次和读取完毕时触发。对于ServerSocketChannel来说，就是接收连接后，产生的客户端Channel并将其注册到EventLoop**），所以，这两个接口是能多次触发的。而又**因为netty在读取从客户端Channel传来的数据时，并不能确定数据的大小，所以netty会创建一个估值大小的ByteBuf进行重复读取，所以，一次客户端Channel发送的数据可能触发多次channelRead接口，当这次读取完毕后，再触发一次channelReadComplete接口**
 
-- 客户端Channel的channelRead和channelReadComplete触发地点：NioByteUnsafe#read
+- 客户端Channel的 和channelReadComplete触发地点：NioByteUnsafe#read
 - 服务端Channel的channelRead和channelReadComplete触发地点：NioMessageUnsafe#read
 
 ```java

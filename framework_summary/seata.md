@@ -354,9 +354,9 @@ GlobalTransactionalInterceptor#startDegradeCheck逻辑：
 
 如何实现的：
 
-> ​		seata的分支事务进行本地commit操作时，会将改动的的数据构造成lockKeys，在分支事务注册到server时带上这些lockKeys，server端会对这些lockKey进行解析构建，并对其进行上锁，上锁成功的标志是成功将全部lockKeys保存到server短的lock_table表（可上锁的前提是lock_table表没有对应的lockKey数据）。在之后的分支事务的数据修改都会先对这些数据在server端上锁判断，以此实现类似数据库的互斥锁。
+> ​		seata的分支事务进行本地commit操作时，会将改动的的数据构造成lockKeys，在分支事务注册到server时带上这些lockKeys，server端会对这些lockKey进行解析构建，并对其进行上锁，上锁成功的标志是成功将全部lockKeys保存到server端的lock_table表（可上锁的前提是lock_table表没有对应的lockKey数据）。在之后的分支事务的数据修改都会先对这些数据在server端上锁判断，以此实现类似数据库的互斥锁。
 >
-> ​		但是，当分支事务A本地commit后，但此时全局事务还未commit。如果有另一个事务B读取到了事务A修改的数据结果，就会产生脏读（因为这时全局事务还未commit，甚至可能触发rollback操作），解决脏读的办法就是事务B读取使用select for update语句，并且被@GlobalTransactional和@GlobalLock注解拦截。拦截后seata内部会对select for update的操作进行锁判断，生成一个SelectForUpdateExecutor执行器（核心执行方法doExecute代码如下）。所以直到分支事务A对应的全局事务结束释放了锁资源后，事务B才会读到数据并返回，以此实现读已提交
+> ​		但是，当分支事务A本地commit后，但此时全局事务还未commit。如果有另一个事务B读取到了事务A修改的数据结果，就会产生脏读（因为这时全局事务还未commit，甚至可能触发rollback操作），解决脏读的办法就是事务B读取使用select for update语句，并且被@GlobalTransactional或@GlobalLock注解拦截。拦截后seata内部会对select for update的操作进行锁判断，生成一个SelectForUpdateExecutor执行器（核心执行方法doExecute代码如下）。所以直到分支事务A对应的全局事务结束释放了锁资源后，事务B才会读到数据并返回，以此实现读已提交
 
 注意**，@GlobalTransactional + select for update**和**@GlobalLock + select for update都可实现select操作的读已提交隔离级别**，**但GlobalLock 更轻量级，它不会注册分支事务和加锁等操作，只会进行锁检查。所以，如果上述事务B不需要运行在全局事务或本地事务的模式先下而又想实现全局事务的读已提交隔离级别，就可使用@GlobalLock + select for update组合**
 
@@ -449,7 +449,7 @@ public T doExecute(Object... args) throws Throwable {
 - confirm：commit操作，并**释放我们try阶段预留的业务资源**
 - cancel：rollback操作，将**try阶段预留的资源进行回滚操作**
 
-### 8.1 TCC可能出现的问题和Seata如何解决？
+### 8.1 TCC可能出现的问题和Seata是如何解决的？
 
 依赖tcc_fence_log表，实现在TCCFenceHandler类里
 
@@ -502,7 +502,7 @@ public static boolean commitFence(Method commitMethod, Object targetTCCBean,
 
 #### 8.1.2 空回滚
 
-**出现场景**：try阶段出现异常，全局事务操作分支事务进行回滚，分支事务执行了cancel阶段
+**出现场景**：try阶段出现异常，全局事务操作分支事务进行回滚，分支事务执行cancel阶段
 
 **如何解决**：分支事务rollback时，判断如果没有tcc_fence_log记录，则不再执行cancel阶段
 
