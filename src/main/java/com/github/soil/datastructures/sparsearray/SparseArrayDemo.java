@@ -3,7 +3,7 @@ package com.github.soil.datastructures.sparsearray;
 import org.junit.Test;
 
 /**
- * 稀疏数组和棋盘演变的二维数组的转换演示
+ *
  *
  * 稀疏数组：
  *		（1）记录数组一共有几行几列，有多少个不同的值，所以为固定3列

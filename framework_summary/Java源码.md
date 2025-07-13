@@ -98,7 +98,7 @@ else { // 这里则高一位为1，与新的容量 & 后，
 
 # 2. LinkedHashMap
 
-LinkedHashMap既是Map，有具有排序功能，根据accessOrder的值来排序
+LinkedHashMap是具有排序功能的Map
 
 重点字段：
 
@@ -106,7 +106,7 @@ LinkedHashMap既是Map，有具有排序功能，根据accessOrder的值来排�
 
 - tail：链表为节点
 
-- accessOrder（默认false）：
+- **accessOrder（默认false）**：基于此字段可以**实现LRU缓存**
 
   >  false: 表示按照放入顺序排序，越晚放入的元素就越排在后面。
   >
@@ -227,6 +227,7 @@ public static void parkUntil(long deadline) {
 
 ```java
 static final class Node {
+    // ================Node的class相关字段=====================
     // 共享锁
     static final Node SHARED = new Node();
     // 互斥锁
@@ -238,6 +239,7 @@ static final class Node {
     // 等待condition唤醒（等待队列才会用到这个状态）
     static final int CONDITION = -2;
     static final int PROPAGATE = -3;
+    // ================node对象的字段========================
 	// 当前节点的状态
     volatile int waitStatus;
     // 同步队列专用

@@ -11,7 +11,7 @@
 
 #### 1.1.2 **为什么要使用三级缓存**
 
-三级缓存专门来解决AOP对象的暴露问题。如果没用AOP是可以只用一级缓存和二级缓存就解决的。但如果使用了AOP且没有三级缓存，那么必须在实例化后就马上完成AOP代理，但这和spring的设计初衷不同，AOP代理的完成时使用了bean的后置处理器**AnnotationAwareAspectJAutoProxyCreator**来完成的，也就是在初始化bean后执行的bean后置处理器方法（**AbstractAutowireCapableBeanFactory#initializeBean**），就不可能再实例化bean后进行代理，所以才有了三级缓存，仅用来提前暴露AOP对象
+三级缓存专门来解决AOP对象的暴露问题。如果没用AOP是可以只用一级缓存和二级缓存就解决的。但如果使用了AOP且没有三级缓存，那么必须在实例化后就马上完成AOP代理，但这和spring的设计初衷不同，AOP代理的完成是使用了bean的后置处理器**AnnotationAwareAspectJAutoProxyCreator**来完成的，也就是在初始化bean后执行的bean后置处理器方法（**AbstractAutowireCapableBeanFactory#initializeBean**），就不可能再实例化bean后进行代理，所以才有了三级缓存，仅用来提前暴露AOP对象
 
 #### 1.1.3 三层级缓存真能完美解决吗？
 
@@ -306,7 +306,7 @@ public Object getProxy(@Nullable ClassLoader classLoader) {
 2. 处理包含元注解@Component（注解的父注解相关意思）里的所有内部类
 3. 处理@PropertySource注解
 4. 处理@ComponentScan和@ComponentScans注解，并对解析出来的BeanDefinition进行递归解析
-   1. 扫描指定包下的所有组件时，通过路劲搜索，将指定包下的所有Class文件每个都封装为org.springframework.core.io.Resource对象（此时还没加载这个Class）。
+   1. 扫描指定包下的所有组件时，通过路径搜索，将指定包下的所有Class文件每个都封装为org.springframework.core.io.Resource对象（此时还没加载这个Class）。
    2. 利用ASM，将Class文件读取到内存里进行解析
    3. 判断是否能成为一个BeanDefinition（比如是否被指定的注解标注，spring默认用的是@Component，而我们可以灵活配置扫描指定的注解（比如mybatis中@Mapper的扫描，feign接口的@FeignClient扫描）。是否需要被排除等等）
    4. 返回合格的BeanDefinition数组，交由调用者处理

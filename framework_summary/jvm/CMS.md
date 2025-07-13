@@ -31,5 +31,5 @@
   - 配置了**ExplicitGCInvokesConcurrent** 参数，且由**System.gc()**调用
   - 根据统计数据动态计算（未配置**UseCMSInitiatingOccupancyOnly**时）
   - 根据 Old Gen 情况判断
-  - **jvm的悲观策略**：**Young GC 已经失败或者可能会失败，JVM 就认为需要进行一次 CMS GC**
+  - **jvm的悲观策略**：**Young GC 已经失败或者可能会  ，JVM 就认为需要进行一次 CMS GC**
   - metaspace扩容且**CMSClassUnloadingEnabled** 启用（默认也是启用的）

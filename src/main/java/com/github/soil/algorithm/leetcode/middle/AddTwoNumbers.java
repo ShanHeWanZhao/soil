@@ -20,14 +20,54 @@ public class AddTwoNumbers {
         node1.next = node2;
         node2.next = node3;
 
-        ListNode node4 = new ListNode(7);
+        ListNode node4 = new ListNode(4);
         ListNode node5 = new ListNode(9);
-        ListNode node6 = new ListNode(11);
+        ListNode node6 = new ListNode(8);
+        ListNode node7 = new ListNode(0);
+        ListNode node8 = new ListNode(1);
         node4.next = node5;
         node5.next = node6;
+        node6.next = node7;
+        node7.next = node8;
         System.out.println(node1);
         System.out.println(node4);
+        System.out.println(addTwo(node1, node4));
         System.out.println(addTwoNumbers(node1, node4));
+    }
+
+    public static ListNode addTwo(ListNode l1, ListNode l2) {
+        int v1 = 0;
+        int v2 = 0;
+        ListNode l1Next = l1;
+        ListNode l2Next = l2;
+        boolean needCarry = false;
+        ListNode result = null;
+        ListNode now = null;
+        do{
+            v1 = l1Next == null ? 0 : l1Next.val;
+            l1Next = l1Next == null ? null : l1Next.next;
+            v2 = l2Next == null ? 0 : l2Next.val;
+            l2Next = l2Next == null ? null : l2Next.next;
+            int sum = v1 + v2;
+            int value = needCarry ? sum + 1 : sum;
+            int realNum;
+            if (value >= 10){
+                needCarry = true;
+                realNum = value - 10;
+            }else {
+                needCarry = false;
+                realNum = value;
+            }
+            ListNode node = new ListNode(realNum);
+            if (result == null){ // first
+                result = node;
+            }else {
+                now.next = node;
+            }
+            now = node;
+        }while(l1Next != null || l2Next != null || needCarry);
+        System.out.println("=======");
+        return result;
     }
 
     public static ListNode addTwoNumbers(ListNode l1, ListNode l2) {

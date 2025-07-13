@@ -27,7 +27,7 @@
 * **-XX:+PrintGCApplicationConcurrentTime** ：打印应用程序的运行时间（许多事情会导致JVM暂停所有线程，停在安全点。gc也只是其中的一种，当暂停之后在重启应用线程，则会刷新这个时间（归0），在重新计数）[链接](http://ifeve.com/logging-stop-the-world-pauses-in-jvm/)
 * **-XX:+PrintGCApplicationStoppedTime** ：打印应用线程暂停的时间，显示应用线程被暂停了多久和应用线程暂停到安全点花费的时间
 * **-XX:TargetSurvivorRatio=50** ：survivor空间的晋升大小空间百分比（默认为50）
-* **-XX:MaxTenuringThreshold=15**  ：年轻代晋升到老年代的最大年龄阈值(tenuring threshold)。默认值为 15[每次GC，增加1岁，到15岁如果还要存活，放入Old区]。**jvm还会动态的计算晋升阈值，方法：依次从年龄为1的对象大小加起来，一直加到大小超过了 [（TargetSurvivorRatio * survivor_capacity）/ 100 ]值，这时加起来的最大年龄大小即为这次晋升的临界阈值**（具体算法在：hotspot\src\share\vm\gc_implementation\shared\ageTable.cpp文件里，方法为compute_tenuring_threshold）
+* **-XX:MaxTenuringThreshold=15**  ：年轻代晋升到  次GC，增加1岁，到15岁如果还要存活，放入Old区]。**jvm还会动态的计算晋升阈值，方法：依次从年龄为1的对象大小加起来，一直加到大小超过了 [（TargetSurvivorRatio * survivor_capacity）/ 100 ]值，这时加起来的最大年龄大小即为这次晋升的临界阈值**（具体算法在：hotspot\src\share\vm\gc_implementation\shared\ageTable.cpp文件里，方法为compute_tenuring_threshold）
 * **-XX:+PrintTenuringDistribution** ：ygc 时打印当前晋升年龄信息
 
 ## 2.垃圾收集器
