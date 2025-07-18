@@ -6,3 +6,12 @@ startup:
   logger:
     enabled: true
     time-unit: ms
+
+logging:
+  level:
+    org.springframework.boot.autoconfigure.logging: debug
+
+condition:
+  or:
+    enable: "false"
+    use: "yes"

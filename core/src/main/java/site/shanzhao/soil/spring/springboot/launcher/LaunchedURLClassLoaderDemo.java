@@ -12,7 +12,7 @@ public class LaunchedURLClassLoaderDemo {
 
     public static void main(String[] args) throws Exception {
         String fatJarPath = System.getProperty("user.home") + "/IdeaProjects/soil/target/soil-1.0.0.jar";
-        File fatJar = new File( fatJarPath);
+        File fatJar = new File(fatJarPath);
         Assert.isTrue(fatJar.exists(), "Fat jar not found");
         JarFile jarFile = new JarFile(fatJar);
         JarFile nestedJar = jarFile.getNestedJarFile(jarFile.getJarEntry("BOOT-INF/lib/hutool-json-5.8.25.jar"));
