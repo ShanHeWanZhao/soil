@@ -42,7 +42,7 @@
         <dependency>
             <groupId>com.google.protobuf</groupId>
             <artifactId>protobuf-java</artifactId>
-            <version>3.14.0</version>
+            <version>3.25.5</version>
         </dependency>
         <!-- https://mvnrepository.com/artifact/org.jboss.marshalling/jboss-marshalling -->
         <dependency>
